@@ -297,9 +297,8 @@ public class SkillAdminController {
     @Secured(action = ActionTypes.WRITE, signType = SignType.AI, apiType = ApiType.ADMIN_API)
     public Result<String> publish(SkillPublishForm form) throws NacosException {
         form.validate();
-        boolean updateLatest = form.getUpdateLatestLabel() == null || form.getUpdateLatestLabel();
         skillOperationService.publish(form.getNamespaceId(), form.getSkillName(), form.getVersion(),
-            updateLatest);
+            true);
         return Result.success("ok");
     }
     
@@ -314,9 +313,8 @@ public class SkillAdminController {
         apiType = ApiType.ADMIN_API)
     public Result<String> forcePublish(SkillPublishForm form) throws NacosException {
         form.validate();
-        boolean updateLatest = form.getUpdateLatestLabel() == null || form.getUpdateLatestLabel();
         skillOperationService.forcePublish(form.getNamespaceId(), form.getSkillName(),
-            form.getVersion(), updateLatest);
+            form.getVersion(), true);
         return Result.success("ok");
     }
     

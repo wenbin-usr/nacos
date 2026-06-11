@@ -765,8 +765,8 @@ public class SkillOperationServiceImpl implements SkillOperationService {
                     SkillContentDigestUtils.computeContentMd5(baseSkill)));
             
             // Step 3: Update meta's editingVersion pointer
-            info.setEditingVersion(newVersion);
-            resourceManager.updateVersionInfoCas(namespaceId, meta, info);
+            resourceManager.markEditingVersionCas(namespaceId, meta, info, newVersion,
+                "create draft");
         }
         AiResourceTraceService.logSuccess(RESOURCE_TYPE_SKILL, name, newVersion,
             AiResourceTraceService.OP_CREATE_DRAFT,
@@ -902,23 +902,19 @@ public class SkillOperationServiceImpl implements SkillOperationService {
             return;
         }
         try {
-            publishApprovedBySystem(namespaceId, name, version, true);
+            publishApprovedBySystem(namespaceId, name, version);
         } catch (Throwable ex) {
             LOGGER.error("Failed to auto publish approved skill {}@{}", name, version, ex);
         }
     }
     
-    private void publishApprovedBySystem(String namespaceId, String name, String version,
-        boolean updateLatestLabel)
+    private void publishApprovedBySystem(String namespaceId, String name, String version)
         throws NacosException {
         AiResourceVersion v =
-            resourceManager.doSystemPublish(namespaceId, name, RESOURCE_TYPE_SKILL, version,
-                updateLatestLabel);
+            resourceManager.doSystemPublish(namespaceId, name, RESOURCE_TYPE_SKILL, version, true);
         SkillIndexManifest manifest = manifestService.loadForUpdate(namespaceId, name);
         manifest.getVersions().put(version, parseStorageFiles(v.getStorage()));
-        if (updateLatestLabel) {
-            manifest.getLabels().put(AiResourceConstants.LABEL_LATEST, version);
-        }
+        manifest.getLabels().put(AiResourceConstants.LABEL_LATEST, version);
         manifestService.write(namespaceId, name, manifest);
     }
     
@@ -930,15 +926,12 @@ public class SkillOperationServiceImpl implements SkillOperationService {
         throws NacosException {
         // Step 1: Update version status to online, clear reviewing pointer in meta
         AiResourceVersion v =
-            resourceManager.doPublish(namespaceId, name, RESOURCE_TYPE_SKILL, version,
-                updateLatestLabel);
+            resourceManager.doPublish(namespaceId, name, RESOURCE_TYPE_SKILL, version, true);
         
         // Step 2: Write version's file list to index manifest (for client discovery)
         SkillIndexManifest manifest = manifestService.loadForUpdate(namespaceId, name);
         manifest.getVersions().put(version, parseStorageFiles(v.getStorage()));
-        if (updateLatestLabel) {
-            manifest.getLabels().put(AiResourceConstants.LABEL_LATEST, version);
-        }
+        manifest.getLabels().put(AiResourceConstants.LABEL_LATEST, version);
         manifestService.write(namespaceId, name, manifest);
     }
     
@@ -949,14 +942,11 @@ public class SkillOperationServiceImpl implements SkillOperationService {
     public void forcePublish(String namespaceId, String name, String version,
         boolean updateLatestLabel) throws NacosException {
         AiResourceVersion v =
-            resourceManager.doForcePublish(namespaceId, name, RESOURCE_TYPE_SKILL, version,
-                updateLatestLabel);
+            resourceManager.doForcePublish(namespaceId, name, RESOURCE_TYPE_SKILL, version, true);
         
         SkillIndexManifest manifest = manifestService.loadForUpdate(namespaceId, name);
         manifest.getVersions().put(version, parseStorageFiles(v.getStorage()));
-        if (updateLatestLabel) {
-            manifest.getLabels().put(AiResourceConstants.LABEL_LATEST, version);
-        }
+        manifest.getLabels().put(AiResourceConstants.LABEL_LATEST, version);
         manifestService.write(namespaceId, name, manifest);
     }
     
@@ -966,16 +956,17 @@ public class SkillOperationServiceImpl implements SkillOperationService {
     }
     
     /**
-     * Update version labels (e.g., "latest") for a skill. Syncs both meta versionInfo and index manifest.
+     * Update custom version labels for a skill. Syncs both meta versionInfo and index manifest.
      */
     @Override
     public void updateLabels(String namespaceId, String name, Map<String, String> labels)
         throws NacosException {
-        resourceManager.validateAndUpdateLabels(namespaceId, name, RESOURCE_TYPE_SKILL, labels);
+        Map<String, String> effectiveLabels =
+            resourceManager.validateAndUpdateLabels(namespaceId, name, RESOURCE_TYPE_SKILL, labels);
         
         SkillIndexManifest manifest = manifestService.query(namespaceId, name);
         if (manifest != null) {
-            manifest.setLabels(labels == null ? new HashMap<>(4) : new LinkedHashMap<>(labels));
+            manifest.setLabels(new LinkedHashMap<>(effectiveLabels));
             manifestService.write(namespaceId, name, manifest);
         }
     }
@@ -1038,6 +1029,7 @@ public class SkillOperationServiceImpl implements SkillOperationService {
             if (files != null && !files.isEmpty()) {
                 SkillIndexManifest manifest = manifestService.loadForUpdate(namespaceId, name);
                 manifest.getVersions().put(version, files);
+                manifest.setLabels(new LinkedHashMap<>(info.getLabels()));
                 manifestService.write(namespaceId, name, manifest);
             }
         } else {
@@ -1045,6 +1037,7 @@ public class SkillOperationServiceImpl implements SkillOperationService {
             SkillIndexManifest manifest = manifestService.query(namespaceId, name);
             if (manifest != null && manifest.getVersions() != null) {
                 manifest.getVersions().remove(version);
+                manifest.setLabels(new LinkedHashMap<>(info.getLabels()));
                 manifestService.write(namespaceId, name, manifest);
             }
         }
