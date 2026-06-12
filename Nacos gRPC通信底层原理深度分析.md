@@ -41,6 +41,51 @@ graph TB
     GCS --> RHR
 ```
 
+```mermaid
+graph TB
+    subgraph "Nacos 服务端 (Server)"
+        BaseRpcServer["BaseRpcServer<br/>@PostConstruct start()"]
+        BaseGrpcServer["BaseGrpcServer<br/>NettyServer 启动"]
+        GrpcSdkServer["GrpcSdkServer<br/>SDK端口: 8848+1000=9848"]
+        GrpcClusterServer["GrpcClusterServer<br/>Cluster端口: 8848+1001=9849"]
+        GrpcReqAcceptor["GrpcRequestAcceptor<br/>一元调用处理"]
+        GrpcBiAcceptor["GrpcBiStreamRequestAcceptor<br/>双向流处理"]
+        ConnMgr["ConnectionManager<br/>连接注册/注销"]
+        HandlerReg["RequestHandlerRegistry<br/>处理器自动发现"]
+
+        BaseRpcServer --> BaseGrpcServer
+        BaseGrpcServer --> GrpcSdkServer
+        BaseGrpcServer --> GrpcClusterServer
+        GrpcSdkServer --> GrpcReqAcceptor
+        GrpcSdkServer --> GrpcBiAcceptor
+        GrpcBiAcceptor --> ConnMgr
+        GrpcReqAcceptor --> HandlerReg
+    end
+
+    subgraph "Nacos 客户端 (Client)"
+        RpcClientFactory["RpcClientFactory<br/>工厂: CLIENT_MAP"]
+        RpcClient["RpcClient<br/>连接管理/重连/健康检查"]
+        GrpcClient["GrpcClient<br/>Channel创建/连接建立"]
+        GrpcConnection["GrpcConnection<br/>gRPC连接封装"]
+        GrpcUtils["GrpcUtils<br/>编解码: JSON ↔ Payload"]
+        PayloadRegistry["PayloadRegistry<br/>SPI类型扫描"]
+
+        RpcClientFactory --> GrpcClient
+        RpcClient --> GrpcClient
+        GrpcClient --> GrpcConnection
+        GrpcConnection --> GrpcUtils
+        GrpcUtils --> PayloadRegistry
+    end
+    subgraph "业务模块层"
+        Naming["NamingGrpcClientProxy"]
+        Config["ConfigRpcTransportClient"]
+    end
+    Naming --> GrpcClient
+    Config --> GrpcClient
+
+    GrpcConnection <-.->|"gRPC 双通道<br/>Request/request (Unary)<br/>BiRequestStream/requestBiStream (Stream)"| GrpcSdkServer
+```
+
 ---
 
 ## 2. gRPC协议定义与消息结构
