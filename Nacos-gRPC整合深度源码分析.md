@@ -881,6 +881,29 @@ sequenceDiagram
     Client->>BiStream: payloadStreamObserver.onNext(Payload)
     Note over BiStream: 收到客户端 ack
 ```
+```mermaid
+sequenceDiagram
+    participant Code as addServices()
+    participant Registry as MutableHandlerRegistry
+    participant gRPC as gRPC Server
+    participant Client as 客户端
+
+    Note over Code: 服务启动时（注册阶段）
+    Code->>Code: 创建 MethodDescriptor<br/>服务名="Request", 方法名="request"
+    Code->>Code: 创建 ServerCallHandler<br/>ServerCalls.asyncUnaryCall(lambda)
+    Code->>Code: 打包为 ServerServiceDefinition
+    Code->>Registry: addService(serviceDef)
+    Note over Registry: 存入内部 Map<br/>"Request/request" → handler
+
+    Note over Client: 运行时（调用阶段）
+    Client->>gRPC: stub.request(payload)
+    Note over gRPC: 解析出完整方法名<br/>"Request/request"
+    gRPC->>Registry: lookupMethod("Request/request")
+    Registry-->>gRPC: 返回 ServerCallHandler
+    gRPC->>gRPC: handler.startCall(..., payload)
+    Note over gRPC: 触发 Lambda 执行<br/>handleCommonRequest(request, observer)
+```
+
 
 ---
 
@@ -900,7 +923,6 @@ sequenceDiagram
 | **拦截器** | `ServerInterceptor` | `ServerInterceptor` + `AbstractRequestFilter` 双层过滤 |
 | **TLS** | 手动配置 | `ProtocolNegotiator` + `RpcServerSslContextRefresher` 动态刷新 |
 | **能力协商** | 无 | `ConnectionSetupRequest` / `SetupAckRequest` 双向能力交换 |
-
 ---
 
 ## 11. 总结
