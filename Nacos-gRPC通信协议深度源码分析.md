@@ -224,6 +224,33 @@ flowchart LR
     G -->|"未找到"| J["抛出 RemoteException<br/>Unknown payload type"]
 ```
 
+
+```mermaid
+sequenceDiagram
+    participant Client as 客户端
+    participant BiStream as BiRequestStream通道
+    participant Server as 服务端
+
+    Note over Client,Server: 连接建立阶段
+    Client->>Server: UNARY: ServerCheckRequest
+    Server-->>Client: UNARY: ServerCheckResponse
+    Client->>Server: BIDI_STREAMING: 打开双向流
+    Client->>BiStream: ConnectionSetupRequest
+    Server->>BiStream: SetupAckRequest
+
+    Note over Client,Server: 业务调用阶段
+    Client->>Server: UNARY: ConfigQueryRequest
+    Server-->>Client: UNARY: ConfigQueryResponse
+    Client->>Server: UNARY: InstanceRequest (注册)
+    Server-->>Client: UNARY: InstanceResponse
+
+    Note over Client,Server: 服务端推送阶段
+    Server->>BiStream: ConfigChangeNotifyRequest
+    Client->>BiStream: ConfigChangeNotifyResponse (ACK)
+    Server->>BiStream: NotifySubscriberRequest
+    Client->>BiStream: NotifySubscriberResponse (ACK)
+```
+
 ---
 
 ## 4. 服务端初始化流程
@@ -301,6 +328,15 @@ public abstract class BaseRpcServer {
     }
 }
 ```
+
+| 字段             | 值           | 含义 |
+|----------------|----------------|----|
+| MethodType     | `UNARY`    |   一元调用，即最经典的「请求-响应」模式（非流式） |
+| FullMethodName | `"Request/request"` |  gRPC 方法的全限定名，格式为 包名.服务名/方法名，这里生成的就是 Request/request|
+| RequestMarshaller        | `ProtoUtils.marshaller(Payload)`   |  请求体的序列化/反序列化器，使用 Nacos 统一的 Payload protobuf 消息  |
+| ResponseMarshaller        | `ProtoUtils.marshaller(Payload)`    |  响应体同样使用 Payload  |
+
+
 
 ### 4.3 BaseGrpcServer — gRPC 服务端核心实现
 
