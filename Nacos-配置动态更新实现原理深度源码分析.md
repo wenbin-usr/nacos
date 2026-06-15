@@ -16,6 +16,14 @@
 12. [线程模型](#12-线程模型)
 13. [容错与重试机制](#13-容错与重试机制)
 14. [总结](#14-总结)
+15. [gRPC Bi-Stream 推送机制深度解析](#15-grpc-bi-stream-推送机制深度解析)
+    - [15.1 什么是 gRPC Bi-Stream](#151-什么是-grpc-bi-stream)
+    - [15.2 Nacos Bi-Stream 的 StreamObserver 持有关系](#152-nacos-bi-stream-的-streamobserver-持有关系)
+    - [15.3 Bi-Stream 连接建立完整流程](#153-bi-stream-连接建立完整流程)
+    - [15.4 配置变更推送完整流程](#154-配置变更推送完整流程)
+    - [15.5 推送重试机制](#155-推送重试机制)
+    - [15.6 StreamObserver 生命周期](#156-streamobserver-生命周期)
+    - [15.7 与 1.4.x HTTP 长轮询的对比](#157-与-14x-http-长轮询的对比)
 
 ---
 
@@ -1182,3 +1190,315 @@ Nacos 配置动态更新的核心流程可以概括为 **"推送通知 + 批量 
 - **全量同步兜底**：每 3 分钟强制全量同步，防止推送丢失
 - **CAS 防重入**：`inNotifying` 原子标记防止 Listener 并发回调
 - **Failover 机制**：支持本地文件优先，服务端不可用时仍可使用本地配置
+
+---
+
+## 15. gRPC Bi-Stream 推送机制深度解析
+
+### 15.1 什么是 gRPC Bi-Stream
+
+gRPC 双向流（Bidirectional Streaming）允许客户端和服务端**同时、独立地**在一个 HTTP/2 长连接上发送多条消息。与 Unary（一问一答）不同，Bi-Stream 的双方可以随时向对方发送消息，无需等待对方响应。
+
+```mermaid
+sequenceDiagram
+    participant Client as 客户端
+    participant Server as 服务端
+
+    Note over Client,Server: Unary Call (一问一答)
+    Client->>Server: Request 1
+    Server-->>Client: Response 1
+    Client->>Server: Request 2
+    Server-->>Client: Response 2
+
+    Note over Client,Server: Bi-Stream (双向自由发送)
+    Client->>Server: Msg A
+    Server->>Client: Msg X
+    Client->>Server: Msg B
+    Server->>Client: Msg Y
+    Client->>Server: Msg C
+    Server->>Client: Msg Z
+```
+
+### 15.2 Nacos Bi-Stream 的 StreamObserver 持有关系
+
+gRPC Bi-Stream 的核心是**双方各持有一个 `StreamObserver`**，调用 `onNext()` 即可向对方发送消息：
+
+```mermaid
+flowchart TB
+    subgraph "客户端"
+        ClientObserver["StreamObserver&lt;Payload&gt;<br/>(客户端接收回调)"]
+        ServerObserver["StreamObserver&lt;Payload&gt;<br/>(客户端发送通道)"]
+    end
+
+    subgraph "服务端"
+        SvrResponseObserver["StreamObserver&lt;Payload&gt;<br/>(服务端发送通道 = responseObserver)"]
+        SvrStreamObserver["StreamObserver&lt;Payload&gt;<br/>(服务端接收回调)"]
+    end
+
+    subgraph "gRPC 框架"
+        HTTP2["HTTP/2 长连接<br/>(Netty)"]
+    end
+
+    ClientObserver -->|"onNext() 回调"| ClientObserver
+    ServerObserver -->|"onNext(payload)"| HTTP2
+    HTTP2 -->|"推送数据"| SvrStreamObserver
+    SvrStreamObserver -->|"onNext() 回调"| SvrStreamObserver
+    SvrResponseObserver -->|"onNext(payload)"| HTTP2
+    HTTP2 -->|"推送数据"| ClientObserver
+
+    Note1["客户端调用<br/>streamStub.requestBiStream(clientObserver)<br/>返回值 = serverObserver"]
+    Note2["服务端方法<br/>requestBiStream(responseObserver)<br/>responseObserver 保存到 Connection"]
+```
+
+**关键代码对应：**
+
+```java
+// ========== 客户端 ==========
+// streamStub.requestBiStream() 的返回值 → 客户端用来向服务端发消息
+StreamObserver<Payload> serverObserver = streamStub.requestBiStream(
+    new StreamObserver<Payload>() {  // ← 客户端接收回调
+        @Override
+        public void onNext(Payload payload) {
+            // 服务端推送的数据在这里接收
+        }
+    });
+// 保存 serverObserver，后续用它发消息
+grpcConn.setPayloadStreamObserver(serverObserver);
+
+// ========== 服务端 ==========
+@Override
+public StreamObserver<Payload> requestBiStream(
+    StreamObserver<Payload> responseObserver) {  // ← 服务端发送通道
+
+    // ★ responseObserver 被保存到 Connection 对象中
+    Connection connection = ConnectionGeneratorServiceDelegate
+        .getInstance().getConnection(metaInfo, responseObserver, channel);
+
+    return new StreamObserver<Payload>() {  // ← 服务端接收回调
+        @Override
+        public void onNext(Payload payload) {
+            // 客户端发来的数据在这里接收
+        }
+    };
+}
+```
+
+### 15.3 Bi-Stream 连接建立完整流程
+
+```mermaid
+sequenceDiagram
+    participant Client as GrpcClient
+    participant Stub as BiRequestStreamStub
+    participant gRPC as gRPC/HTTP2
+    participant Server as GrpcBiStreamRequestAcceptor
+    participant ConnMgr as ConnectionManager
+    participant Conn as Connection
+
+    Note over Client,Conn: === 阶段1: 建立 Bi-Stream ===
+
+    Client->>Stub: requestBiStream(clientObserver)
+    Note over Client: 传入 clientObserver<br/>(客户端接收回调)
+    Stub->>gRPC: 发起 HTTP/2 Stream
+    gRPC->>Server: requestBiStream(responseObserver)
+    Note over Server: gRPC 框架传入 responseObserver<br/>(服务端发送通道)
+
+    Server->>Server: 创建 StreamObserver (服务端接收回调)
+    Server-->>gRPC: return serverStreamObserver
+    gRPC-->>Stub: return serverObserver
+    Stub-->>Client: serverObserver
+    Note over Client: 保存 serverObserver<br/>到 grpcConn.payloadStreamObserver
+
+    Note over Client,Conn: === 阶段2: 客户端发送注册请求 ===
+
+    Client->>Client: serverObserver.onNext(ConnectionSetupRequest)
+    Note over Client: 通过 Bi-Stream 发送注册请求
+    Client->>gRPC: Payload → HTTP/2
+    gRPC->>Server: serverStreamObserver.onNext(Payload)
+    Server->>Server: GrpcUtils.parse() → ConnectionSetupRequest
+    Server->>Server: 构建 ConnectionMeta
+    Server->>Conn: ConnectionGenerator.getConnection(metaInfo, responseObserver, channel)
+    Note over Conn: ★ responseObserver 被保存到 Connection 中
+    Conn->>Conn: this.payloadStreamObserver = responseObserver
+    Server->>ConnMgr: register(connectionId, connection)
+    ConnMgr-->>Server: OK
+
+    Note over Client,Conn: === 阶段3: 服务端返回能力表 ===
+
+    Server->>Conn: sendRequestNoAck(SetupAckRequest)
+    Conn->>Conn: responseObserver.onNext(Payload)
+    Note over Conn: ★ 通过 responseObserver 发送
+    Conn->>gRPC: Payload → HTTP/2
+    gRPC->>Client: clientObserver.onNext(Payload)
+    Client->>Client: GrpcUtils.parse() → SetupAckRequest
+    Client->>Client: recAbilityContext.release()
+    Note over Client: 连接建立完成
+```
+
+### 15.4 配置变更推送完整流程
+
+```mermaid
+sequenceDiagram
+    participant CC as ConfigCacheService
+    participant NC as NotifyCenter
+    participant RCN as RpcConfigChangeNotifier
+    participant CLC as ConfigChangeListenContext
+    participant ConnMgr as ConnectionManager
+    participant Conn as Connection<br/>(持有 responseObserver)
+    participant gRPC as gRPC/HTTP2
+    participant Client as 客户端<br/>(clientObserver)
+    participant CW as ClientWorker
+    participant CD as CacheData
+    participant L as 业务 Listener
+
+    Note over CC,L: === 1. 配置变更触发 ===
+
+    CC->>CC: updateMd5(groupKey, newMd5)
+    CC->>NC: publishEvent(LocalDataChangeEvent)
+    NC->>RCN: onEvent(event)
+
+    Note over CC,L: === 2. 查找监听客户端 ===
+
+    RCN->>CLC: getListeners(groupKey)
+    CLC-->>RCN: Set{connectionId1, connectionId2, ...}
+
+    Note over CC,L: === 3. 遍历推送 ===
+
+    loop 每个 connectionId
+        RCN->>ConnMgr: getConnection(connectionId)
+        ConnMgr-->>RCN: Connection
+
+        RCN->>RCN: 构造 ConfigChangeNotifyRequest<br/>(只含 dataId/group/tenant, 不含内容!)
+
+        RCN->>Conn: sendRequest(notifyRequest)
+        Conn->>Conn: GrpcUtils.convert(request) → Payload
+        Conn->>Conn: ★ responseObserver.onNext(Payload)
+        Note over Conn: 调用保存的 responseObserver<br/>通过 Bi-Stream 推送
+        Conn->>gRPC: Payload → HTTP/2 Frame
+        gRPC->>Client: ★ clientObserver.onNext(Payload)
+        Note over Client: 数据到达客户端回调
+
+        Client->>Client: GrpcUtils.parse() → ConfigChangeNotifyRequest
+        Client->>CW: handleConfigChangeNotifyRequest(request)
+        CW->>CD: receiveNotifyChanged = true
+        CW->>CD: isConsistentWithServer = false
+        CW->>CW: notifyListenConfig()
+        Note over CW: 触发监听执行
+
+        Client->>Conn: sendResponse(ack)
+        Note over Client: 通过 Bi-Stream 返回 ACK
+    end
+
+    Note over CC,L: === 4. 客户端批量 MD5 比对 ===
+
+    CW->>CW: executeConfigListen()
+    CW->>CW: checkListenCache()
+    CW->>CW: buildConfigRequest(所有 CacheData 的 MD5)
+    CW->>gRPC: ConfigBatchListenRequest (Unary Call)
+    gRPC->>gRPC: 服务端 ConfigChangeBatchListenRequestHandler
+    gRPC-->>CW: ConfigChangeBatchListenResponse{changedConfigs}
+
+    Note over CC,L: === 5. 拉取变更内容 ===
+
+    loop 每个变更的配置
+        CW->>gRPC: ConfigQueryRequest (Unary Call)
+        gRPC-->>CW: ConfigQueryResponse{content, md5}
+        CW->>CD: setContent(content)
+    end
+
+    Note over CC,L: === 6. 回调业务 Listener ===
+
+    CW->>CD: checkListenerMd5()
+    CD->>CD: md5 != lastCallMd5 ?
+    CD->>L: ★ receiveConfigInfo(content)
+    Note over L: 业务代码收到最新配置
+```
+
+### 15.5 推送重试机制
+
+```mermaid
+flowchart TD
+    A["RpcConfigChangeNotifier<br/>收到 LocalDataChangeEvent"] --> B["获取监听该 groupKey 的所有 connectionId"]
+    B --> C["遍历每个 connectionId"]
+    C --> D["创建 RpcPushTask<br/>tryTimes = 0"]
+    D --> E["push(task, connectionManager)"]
+
+    E --> F{"RpcPushTask.run()"}
+    F --> G{"TPS 限流检查"}
+    G -->|"通过"| H["rpcPushService.pushWithCallback()<br/>→ responseObserver.onNext(Payload)"]
+    G -->|"限流"| I["push(this, connectionManager)<br/>延迟重试"]
+
+    H --> J{"推送结果?"}
+    J -->|"成功"| K["RpcPushCallback.onSuccess()<br/>TPS 成功计数"]
+    J -->|"失败"| L["RpcPushCallback.onFail()<br/>TPS 失败计数"]
+
+    L --> M{"isOverTimes()?"}
+    M -->|"是"| N["connectionManager.unregister()<br/>注销连接"]
+    M -->|"否"| O{"连接还存在?"}
+    O -->|"是"| P["scheduleClientConfigNotifier()<br/>延迟 = tryTimes * 2 秒"]
+    O -->|"否"| Q["忽略, 客户端已离线"]
+    P --> F
+
+    I --> F
+
+    K --> R["推送完成"]
+    N --> R
+    Q --> R
+```
+
+### 15.6 StreamObserver 生命周期
+
+```mermaid
+stateDiagram-v2
+    [*] --> 创建: GrpcBiStreamRequestAcceptor<br/>requestBiStream() 被调用
+
+    创建 --> 活跃: responseObserver 保存到 Connection
+    活跃 --> 活跃: onNext(Payload) 推送消息
+    活跃 --> 活跃: 客户端 ACK 到达
+
+    活跃 --> 客户端断开: 客户端 onCompleted()
+    活跃 --> 连接异常: 客户端 onError()
+    活跃 --> 服务端主动关闭: connection.close()
+
+    客户端断开 --> 清理: connectionManager.unregister()
+    连接异常 --> 清理: connectionManager.unregister()
+    服务端主动关闭 --> 清理: connectionManager.unregister()
+
+    清理 --> [*]: StreamObserver 被 GC
+```
+
+### 15.7 与 1.4.x HTTP 长轮询的对比
+
+```mermaid
+flowchart LR
+    subgraph "1.4.x HTTP 长轮询"
+        A1["Client POST /listener<br/>Header: Long-Pulling-Timeout=30s"] --> A2["Server 挂起 HTTP 连接"]
+        A2 --> A3["加入 allSubs 队列"]
+        A3 --> A4{"30s 超时 或 配置变更?"}
+        A4 -->|"超时"| A5["返回空, 客户端立即重发"]
+        A4 -->|"变更"| A6["DataChangeTask 遍历 allSubs<br/>找到订阅者 → sendResponse()"]
+        A6 --> A7["返回 groupKey 列表"]
+        A7 --> A8["Client GET /configs 逐个拉取"]
+        A5 --> A1
+    end
+
+    subgraph "2.x/3.x gRPC Bi-Stream"
+        B1["Client 建立 gRPC Bi-Stream"] --> B2["Server 保存 responseObserver"]
+        B2 --> B3["Client 发送 ConfigBatchListenRequest<br/>(注册监听 + MD5 比对)"]
+        B3 --> B4["Server ConfigChangeListenContext<br/>维护 groupKey → connectionId 映射"]
+        B4 --> B5{"配置变更?"}
+        B5 -->|"变更"| B6["RpcConfigChangeNotifier<br/>→ responseObserver.onNext()"]
+        B6 --> B7["推送 ConfigChangeNotifyRequest<br/>(只含 dataId/group/tenant)"]
+        B7 --> B8["Client 收到推送<br/>→ ConfigBatchListenRequest (MD5比对)"]
+        B8 --> B9["只拉取变更的配置"]
+    end
+```
+
+| 维度 | 1.4.x HTTP 长轮询 | 2.x/3.x gRPC Bi-Stream |
+|------|-------------------|------------------------|
+| 连接模型 | 每次轮询一个 HTTP 请求，30s 超时后重建 | 一个 gRPC 长连接持续复用 |
+| 推送方式 | 服务端挂起连接，变更时唤醒返回 | 服务端直接调用 `responseObserver.onNext()` |
+| 资源消耗 | 大量挂起的 HTTP 连接占用线程 | 少量 gRPC 连接，Netty 异步处理 |
+| 推送内容 | 返回变更的 groupKey 列表 | 推送 ConfigChangeNotifyRequest（只含 key） |
+| 注册方式 | 每次 HTTP 请求时上报 MD5 | 建立连接时注册到 ConfigChangeListenContext |
+| 重试机制 | 无（客户端超时后自动重发） | TPS 限流 + 指数退避重试（0s/2s/4s...） |
+| 实时性 | 最多 30s 延迟 | 秒级推送 |
