@@ -60,12 +60,15 @@ public class PushReceiver implements Runnable, Closeable {
     public PushReceiver(HostReactor hostReactor) {
         try {
             this.hostReactor = hostReactor;
+            // udp端口号由push.receiver.udp.port配置项决定
             String udpPort = getPushReceiverUdpPort();
+            // 创建UDP Socket，绑定端口
             if (StringUtils.isEmpty(udpPort)) {
-                this.udpSocket = new DatagramSocket();
+                this.udpSocket = new DatagramSocket();  // 不指定端口，由OS随机分配一个可用端口
             } else {
                 this.udpSocket = new DatagramSocket(new InetSocketAddress(Integer.parseInt(udpPort)));
             }
+            // 初始化线程池
             this.executorService = new ScheduledThreadPoolExecutor(1, new ThreadFactory() {
                 @Override
                 public Thread newThread(Runnable r) {
@@ -75,7 +78,7 @@ public class PushReceiver implements Runnable, Closeable {
                     return thread;
                 }
             });
-            
+            // 启动接收任务
             this.executorService.execute(this);
         } catch (Exception e) {
             NAMING_LOGGER.error("[NA] init udp socket failed", e);
