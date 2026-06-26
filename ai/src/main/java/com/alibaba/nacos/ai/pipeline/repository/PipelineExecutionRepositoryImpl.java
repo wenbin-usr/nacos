@@ -16,9 +16,9 @@
 
 package com.alibaba.nacos.ai.pipeline.repository;
 
-import com.alibaba.nacos.ai.pipeline.model.PipelineExecution;
-import com.alibaba.nacos.ai.pipeline.model.PipelineExecutionStatus;
-import com.alibaba.nacos.ai.pipeline.model.PipelineNodeResult;
+import com.alibaba.nacos.api.ai.model.pipeline.PipelineExecution;
+import com.alibaba.nacos.api.ai.model.pipeline.PipelineExecutionStatus;
+import com.alibaba.nacos.api.ai.model.pipeline.PipelineNodeResult;
 import com.alibaba.nacos.common.utils.JacksonUtils;
 import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.persistence.datasource.DynamicDataSource;
@@ -116,30 +116,6 @@ public class PipelineExecutionRepositoryImpl implements PipelineExecutionReposit
             return DataSourceConstant.MYSQL;
         }
         return DynamicDataSource.getInstance().getDataSource().getDataSourceType();
-    }
-    
-    String buildSingleLatestSql() {
-        return appendFirstRowClause("SELECT * FROM pipeline_execution "
-            + "WHERE resource_type=? AND resource_name=? AND namespace_id=? AND version=? "
-            + "ORDER BY create_time DESC");
-    }
-    
-    String appendPageClause(String baseSql, int offset, int limit) {
-        String dataSourceType = getDataSourceType();
-        if (DataSourceConstant.DERBY.equalsIgnoreCase(dataSourceType)
-            || DataSourceConstant.ORACLE.equalsIgnoreCase(dataSourceType)) {
-            return baseSql + " OFFSET " + offset + " ROWS FETCH NEXT " + limit + " ROWS ONLY";
-        }
-        return baseSql + " LIMIT " + limit + " OFFSET " + offset;
-    }
-    
-    private String appendFirstRowClause(String baseSql) {
-        String dataSourceType = getDataSourceType();
-        if (DataSourceConstant.DERBY.equalsIgnoreCase(dataSourceType)
-            || DataSourceConstant.ORACLE.equalsIgnoreCase(dataSourceType)) {
-            return baseSql + " FETCH FIRST 1 ROW ONLY";
-        }
-        return baseSql + " LIMIT 1";
     }
     
     @Override

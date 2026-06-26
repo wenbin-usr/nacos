@@ -23,9 +23,9 @@ import com.alibaba.nacos.ai.pipeline.PublishPipelineManager;
 import com.alibaba.nacos.ai.pipeline.config.PipelineConfigProvider;
 import com.alibaba.nacos.ai.pipeline.model.PipelineCallback;
 import com.alibaba.nacos.ai.pipeline.model.PipelineConfig;
-import com.alibaba.nacos.ai.pipeline.model.PipelineExecution;
-import com.alibaba.nacos.ai.pipeline.model.PipelineExecutionResult;
-import com.alibaba.nacos.ai.pipeline.model.PipelineExecutionStatus;
+import com.alibaba.nacos.api.ai.model.pipeline.PipelineExecution;
+import com.alibaba.nacos.api.ai.model.pipeline.PipelineExecutionResult;
+import com.alibaba.nacos.api.ai.model.pipeline.PipelineExecutionStatus;
 import com.alibaba.nacos.ai.pipeline.repository.PipelineExecutionRepository;
 import com.alibaba.nacos.ai.service.repository.AiResourcePersistService;
 import com.alibaba.nacos.ai.service.repository.AiResourceVersionPersistService;
@@ -35,6 +35,8 @@ import com.alibaba.nacos.api.ai.model.skills.SkillBasicInfo;
 import com.alibaba.nacos.api.ai.model.skills.SkillMeta;
 import com.alibaba.nacos.api.ai.model.skills.SkillResource;
 import com.alibaba.nacos.api.ai.model.skills.SkillSummary;
+import com.alibaba.nacos.api.ai.model.skills.SkillUploadPrecheckRequest;
+import com.alibaba.nacos.api.ai.model.skills.SkillUploadPrecheckResult;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.exception.api.NacosApiException;
 import com.alibaba.nacos.api.model.Page;
@@ -300,6 +302,22 @@ class SkillOperationServiceImplTest {
     }
     
     @Test
+    void testUploadSkillFromZipStripsWrapperDirectoryFromStorage()
+        throws NacosException, IOException {
+        String namespaceId = "test-namespace";
+        byte[] zipBytes = createZipBytesWithWrapperDirectoryResources();
+        when(aiResourcePersistService.find(eq(namespaceId), anyString(), anyString()))
+            .thenReturn(null);
+        
+        String result = uploadSkill(namespaceId, zipBytes);
+        
+        assertEquals("test-skill", result);
+        verify(aiResourceVersionPersistService).insert(argThat(inserted -> inserted != null
+            && inserted.getStorage().contains("\"references/readme.md\"")
+            && !inserted.getStorage().contains("upload-wrapper")));
+    }
+    
+    @Test
     void testUploadSkillFromZipWithCommitMsgCreatesDraftDesc()
         throws NacosException, IOException {
         String namespaceId = "test-namespace";
@@ -395,9 +413,8 @@ class SkillOperationServiceImplTest {
     }
     
     @Test
-    void testUploadSkillFromZipWithOverwriteCreatesDraftForExistingSkillWithoutEditing()
-        throws NacosException,
-        IOException {
+    void testUploadSkillFromZipWithOverwriteRejectsWhenReviewingVersionExists()
+        throws IOException {
         String namespaceId = "test-namespace";
         byte[] zipBytes = createValidZipBytes();
         AiResource meta = new AiResource();
@@ -407,25 +424,12 @@ class SkillOperationServiceImplTest {
         meta.setStatus("enable");
         meta.setMetaVersion(2L);
         meta.setVersionInfo("{\"reviewingVersion\":\"v2\",\"labels\":{},\"onlineCnt\":1}");
-        Page<com.alibaba.nacos.ai.model.AiResourceVersion> versions = new Page<>();
-        com.alibaba.nacos.ai.model.AiResourceVersion v1 =
-            new com.alibaba.nacos.ai.model.AiResourceVersion();
-        v1.setVersion("v2");
-        versions.setPageItems(List.of(v1));
         when(aiResourcePersistService.find(eq(namespaceId), eq("test-skill"), anyString()))
             .thenReturn(meta);
-        when(aiResourceVersionPersistService.list(eq(namespaceId), eq("test-skill"), anyString(),
-            isNull(), anyInt(), anyInt()))
-            .thenReturn(versions);
-        when(aiResourcePersistService.updateMetaCas(eq(namespaceId), eq("test-skill"), anyString(),
-            eq(2L), any()))
-            .thenReturn(true);
         
-        String result = uploadSkill(namespaceId, zipBytes, true);
-        
-        assertEquals("test-skill", result);
-        verify(aiResourceVersionPersistService).insert(argThat(inserted -> inserted != null
-            && "test-skill".equals(inserted.getName()) && "3.0.6".equals(inserted.getVersion())));
+        NacosApiException exception = assertThrows(NacosApiException.class,
+            () -> uploadSkill(namespaceId, zipBytes, true));
+        assertEquals(NacosException.CONFLICT, exception.getErrCode());
     }
     
     @Test
@@ -495,27 +499,181 @@ class SkillOperationServiceImplTest {
     }
     
     @Test
-    void testUploadSkillFromZipRejectsInvalidFrontmatterMetadataVersion() throws IOException {
+    void testUploadSkillFromZipUsesDefaultVersionWhenFrontmatterMetadataVersionInvalid()
+        throws NacosException, IOException {
         String namespaceId = "test-namespace";
         byte[] zipBytes = createZipBytesWithNestedMetadataVersion("latest");
+        when(aiResourcePersistService.find(eq(namespaceId), anyString(), anyString()))
+            .thenReturn(null);
         
-        NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> uploadSkill(namespaceId, zipBytes, false));
-        assertTrue(exception.getErrMsg().contains("SKILL.md frontmatter"),
-            "error should identify the frontmatter as the source");
-        assertTrue(exception.getErrMsg().contains("latest"),
-            "error should include the offending value");
+        String result = uploadSkill(namespaceId, zipBytes, false);
+        
+        assertEquals("test-skill", result);
+        verify(aiResourceVersionPersistService).insert(argThat(inserted -> inserted != null
+            && "0.0.1".equals(inserted.getVersion())));
     }
     
     @Test
-    void testUploadSkillFromZipRejectsInvalidTargetVersion() throws IOException {
+    void testUploadSkillFromZipUsesDefaultVersionWhenTargetVersionInvalid()
+        throws NacosException, IOException {
         String namespaceId = "test-namespace";
         byte[] zipBytes = createZipBytesWithoutVersion();
+        when(aiResourcePersistService.find(eq(namespaceId), anyString(), anyString()))
+            .thenReturn(null);
+        
+        String result = uploadSkill(namespaceId, zipBytes, false, "not-a-version");
+        
+        assertEquals("test-skill", result);
+        verify(aiResourceVersionPersistService).insert(argThat(inserted -> inserted != null
+            && "0.0.1".equals(inserted.getVersion())));
+    }
+    
+    @Test
+    void testUploadSkillFromZipNormalizesShortTargetVersion()
+        throws NacosException, IOException {
+        String namespaceId = "test-namespace";
+        byte[] zipBytes = createZipBytesWithoutVersion();
+        when(aiResourcePersistService.find(eq(namespaceId), anyString(), anyString()))
+            .thenReturn(null);
+        
+        String result = uploadSkill(namespaceId, zipBytes, false, "3");
+        
+        assertEquals("test-skill", result);
+        verify(aiResourceVersionPersistService).insert(argThat(inserted -> inserted != null
+            && "3.0.0".equals(inserted.getVersion())));
+    }
+    
+    @Test
+    void testUploadSkillFromZipNormalizesShortVersionAndGeneratesNextWhenOccupied()
+        throws NacosException, IOException {
+        String namespaceId = "test-namespace";
+        byte[] zipBytes = createZipBytes("1.0");
+        AiResource meta = new AiResource();
+        meta.setNamespaceId(namespaceId);
+        meta.setName("test-skill");
+        meta.setType("skill");
+        meta.setStatus("enable");
+        meta.setMetaVersion(2L);
+        meta.setVersionInfo("{\"labels\":{\"latest\":\"1.0.0\"},\"onlineCnt\":1}");
+        Page<com.alibaba.nacos.ai.model.AiResourceVersion> versions = new Page<>();
+        com.alibaba.nacos.ai.model.AiResourceVersion v1 =
+            new com.alibaba.nacos.ai.model.AiResourceVersion();
+        v1.setVersion("1.0.0");
+        versions.setPageItems(List.of(v1));
+        when(aiResourcePersistService.find(eq(namespaceId), eq("test-skill"), anyString()))
+            .thenReturn(meta);
+        when(aiResourceVersionPersistService.list(eq(namespaceId), eq("test-skill"), anyString(),
+            isNull(), anyInt(), anyInt()))
+            .thenReturn(versions);
+        when(aiResourcePersistService.updateMetaCas(eq(namespaceId), eq("test-skill"), anyString(),
+            eq(2L), any()))
+            .thenReturn(true);
+        
+        String result = uploadSkill(namespaceId, zipBytes, false);
+        
+        assertEquals("test-skill", result);
+        verify(aiResourceVersionPersistService).insert(argThat(inserted -> inserted != null
+            && "1.0.1".equals(inserted.getVersion())));
+    }
+    
+    @Test
+    void testUploadSkillFromZipWithShortVersionRequiresOverwriteForExistingDraft()
+        throws IOException {
+        String namespaceId = "test-namespace";
+        byte[] zipBytes = createZipBytes("1.0");
+        AiResource meta = new AiResource();
+        meta.setNamespaceId(namespaceId);
+        meta.setName("test-skill");
+        meta.setType("skill");
+        meta.setStatus("enable");
+        meta.setMetaVersion(2L);
+        meta.setVersionInfo("{\"editingVersion\":\"1.0.1\",\"labels\":{\"latest\":\"1.0.0\"},"
+            + "\"onlineCnt\":1}");
+        when(aiResourcePersistService.find(eq(namespaceId), eq("test-skill"), anyString()))
+            .thenReturn(meta);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> uploadSkill(namespaceId, zipBytes, false, "not-a-version"));
-        assertTrue(exception.getErrMsg().contains("targetVersion"),
-            "error should identify targetVersion as the source");
+            () -> uploadSkill(namespaceId, zipBytes, false));
+        
+        assertEquals(NacosException.CONFLICT, exception.getErrCode());
+    }
+    
+    @Test
+    void testPrecheckUploadSkillReturnsRawShortVersionForNewSkill() throws NacosException {
+        String namespaceId = "test-namespace";
+        SkillUploadPrecheckRequest request = new SkillUploadPrecheckRequest();
+        request.setNamespaceId(namespaceId);
+        request.setSkillName("test-skill");
+        request.setDescription("Test skill description");
+        request.setParsedVersion("2.3");
+        request.setVersionSource("SKILL.md frontmatter");
+        when(aiResourcePersistService.find(eq(namespaceId), eq("test-skill"), anyString()))
+            .thenReturn(null);
+        
+        List<SkillUploadPrecheckResult> results =
+            skillOperationService.batchPrecheckUploadSkill(List.of(request));
+        
+        assertEquals(1, results.size());
+        SkillUploadPrecheckResult result = results.get(0);
+        assertEquals("2.3", result.getParsedVersion());
+        assertEquals("2.3.0", result.getResolvedVersion());
+        assertEquals("VALID", result.getStatus());
+        assertTrue(result.getWarnings().isEmpty());
+        assertEquals("2.3.0", result.getActions().get(0).getResultVersion());
+    }
+    
+    @Test
+    void testPrecheckUploadSkillReturnsRawInvalidVersionForNewSkill() throws NacosException {
+        String namespaceId = "test-namespace";
+        SkillUploadPrecheckRequest request = new SkillUploadPrecheckRequest();
+        request.setNamespaceId(namespaceId);
+        request.setSkillName("test-skill");
+        request.setDescription("Test skill description");
+        request.setParsedVersion("latest");
+        request.setVersionSource("SKILL.md frontmatter");
+        when(aiResourcePersistService.find(eq(namespaceId), eq("test-skill"), anyString()))
+            .thenReturn(null);
+        
+        List<SkillUploadPrecheckResult> results =
+            skillOperationService.batchPrecheckUploadSkill(List.of(request));
+        
+        assertEquals(1, results.size());
+        SkillUploadPrecheckResult result = results.get(0);
+        assertEquals("latest", result.getParsedVersion());
+        assertEquals("0.0.1", result.getResolvedVersion());
+        assertEquals("VALID", result.getStatus());
+        assertTrue(result.getWarnings().get(0).contains("Invalid version"));
+        assertEquals("0.0.1", result.getActions().get(0).getResultVersion());
+    }
+    
+    @Test
+    void testUploadSkillFromZipWithShortVersionOverwritesExistingDraft()
+        throws NacosException, IOException {
+        String namespaceId = "test-namespace";
+        byte[] zipBytes = createZipBytes("1.0");
+        AiResource meta = new AiResource();
+        meta.setNamespaceId(namespaceId);
+        meta.setName("test-skill");
+        meta.setType("skill");
+        meta.setStatus("enable");
+        meta.setMetaVersion(2L);
+        meta.setVersionInfo("{\"editingVersion\":\"1.0.1\",\"labels\":{\"latest\":\"1.0.0\"},"
+            + "\"onlineCnt\":1}");
+        com.alibaba.nacos.ai.model.AiResourceVersion version =
+            new com.alibaba.nacos.ai.model.AiResourceVersion();
+        version.setVersion("1.0.1");
+        version.setStatus("draft");
+        when(aiResourcePersistService.find(eq(namespaceId), eq("test-skill"), anyString()))
+            .thenReturn(meta);
+        when(aiResourceVersionPersistService.find(eq(namespaceId), eq("test-skill"), anyString(),
+            eq("1.0.1")))
+            .thenReturn(version);
+        
+        String result = uploadSkill(namespaceId, zipBytes, true);
+        
+        assertEquals("test-skill", result);
+        verify(aiResourceVersionPersistService).updateStorage(eq(namespaceId), eq("test-skill"),
+            anyString(), eq("1.0.1"), anyString());
     }
     
     @Test
@@ -779,6 +937,28 @@ class SkillOperationServiceImplTest {
                 zos.write(metaJson.getBytes());
                 zos.closeEntry();
             }
+        }
+        return baos.toByteArray();
+    }
+    
+    private byte[] createZipBytesWithWrapperDirectoryResources() throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            ZipEntry entry = new ZipEntry("upload-wrapper/SKILL.md");
+            zos.putNextEntry(entry);
+            String skillMd = "---\n"
+                + "name: test-skill\n"
+                + "description: Test skill description\n"
+                + "version: 3.0.6\n"
+                + "---\n\n"
+                + "This is a test instruction";
+            zos.write(skillMd.getBytes());
+            zos.closeEntry();
+            
+            entry = new ZipEntry("upload-wrapper/references/readme.md");
+            zos.putNextEntry(entry);
+            zos.write("# Readme".getBytes());
+            zos.closeEntry();
         }
         return baos.toByteArray();
     }
