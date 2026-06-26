@@ -46,6 +46,7 @@ public class NacosBootstrap {
     private static final String SPRING_JMX_ENABLED = "spring.jmx.enabled";
     
     public static void main(String[] args) {
+        // nacos.deployment.type配置项，默认为merged
         String type = System.getProperty(Constants.NACOS_DEPLOYMENT_TYPE, Constants.NACOS_DEPLOYMENT_TYPE_MERGED);
         DeploymentType deploymentType = DeploymentType.getType(type);
         EnvUtil.setDeploymentType(deploymentType);
