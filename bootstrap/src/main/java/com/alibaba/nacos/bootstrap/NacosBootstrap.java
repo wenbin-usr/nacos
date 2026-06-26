@@ -82,11 +82,15 @@ public class NacosBootstrap {
     }
     
     private static void startWithConsole(String[] args) {
+        // 启动核心上下文（Nacos 的核心服务，如配置、命名服务等基础能力）
         ConfigurableApplicationContext coreContext = startCoreContext(args);
         prepareCoreContext(coreContext);
+        // 启动Server端Web上下文，对外提供Nacos的HTTP API服务，运行在8848端口
         ConfigurableApplicationContext serverWebContext = startServerWebContext(args, coreContext);
+        // 启动控制台（Console）Web上下文，即Nacos的管理后台界面，运行在8080端口
         ConfigurableApplicationContext consoleContext = startConsoleContext(args, coreContext);
         if (isEnabledMcpRegistryApi(coreContext)) {
+            // 启动MCP注册中心上下文
             ConfigurableApplicationContext mcpRegistryContext = startMcpRegistryContext(args, coreContext);
         }
     }
