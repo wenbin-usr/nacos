@@ -257,6 +257,121 @@ sequenceDiagram
 
 所以注入到别处的 `@RefreshScope` Bean 是个**代理壳**，真正的实例藏在 scope 缓存里。配置变更 → `refreshAll()` 清空缓存 → 下次方法调用重建实例 → 新配置生效。
 
+### 3.4 代理 Bean 的创建过程
+
+`@RefreshScope` Bean 最终被注入到别处的是一个 CGLIB 代理壳，真实 Bean 延迟到首次方法调用才实例化。整个代理 Bean 的创建横跨四个阶段：**注册 Scope → 扫描注册双 BeanDefinition → 替换代理工厂类 → 注入时生成 CGLIB 代理**。
+
+#### (1) 创建过程时序图
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as 应用启动
+    participant RS as RefreshScope<br/>(GenericScope)
+    participant Reg as BeanDefinitionRegistry
+    participant Reader as AnnotatedBeanDefinition<br/>Reader
+    participant BF as BeanFactory
+    participant LSPFB as LockedScoped<br/>ProxyFactoryBean
+    participant PF as ProxyFactory
+    participant Proxy as CGLIB 代理对象
+    participant Caller as 注入位置
+
+    rect rgb(240, 248, 255)
+    Note over App,Reg: 阶段1：注册 refresh Scope
+    App->>RS: RefreshAutoConfiguration 注册 RefreshScope Bean
+    App->>RS: 触发 postProcessBeanFactory()
+    RS->>BF: registerScope("refresh", this)
+    Note over BF: 容器此后知道 refresh scope<br/>由 RefreshScope 负责实例化
+    end
+
+    rect rgb(255, 250, 240)
+    Note over App,Reader: 阶段2：扫描 @RefreshScope 类，注册"双" BeanDefinition
+    Reader->>Reader: 读取 @RefreshScope<br/>= @Scope("refresh") + TARGET_CLASS
+    Reader->>Reg: 注册原始 BD<br/>name=scopedTarget.xxx<br/>scope=refresh (真实 Bean)
+    Reader->>Reg: 注册代理 BD<br/>name=xxx<br/>class=ScopedProxyFactoryBean
+    Note over Reg: 两个 BD 共存：<br/>xxx=代理，scopedTarget.xxx=真实
+    end
+
+    rect rgb(248, 255, 240)
+    Note over App,Reg: 阶段3：把代理工厂类替换为加锁版
+    App->>RS: 触发 postProcessBeanDefinitionRegistry()
+    loop 遍历所有 BeanDefinition
+        RS->>Reg: 判断 class==ScopedProxyFactoryBean<br/>且 decorated scope==refresh
+        alt 匹配 refresh scope
+            RS->>Reg: setBeanClass(LockedScopedProxyFactoryBean)
+            RS->>Reg: 加构造参数 = this(scope)
+            RS->>Reg: setSynthetic(true)
+        end
+    end
+    Note over Reg: 代理 BD 的 beanClass 已被替换<br/>默认 ScopedProxyFactoryBean → 加锁版
+    end
+
+    rect rgb(248, 240, 255)
+    Note over Caller,Proxy: 阶段4：注入依赖时才真正创建 CGLIB 代理
+    Caller->>BF: 注入依赖 getBean("xxx")
+    BF->>LSPFB: 实例化 LockedScopedProxyFactoryBean(scope)
+    BF->>LSPFB: setTargetBeanName("scopedTarget.xxx")
+    BF->>LSPFB: setBeanFactory(this)
+    LSPFB->>LSPFB: super.setBeanFactory()<br/>创建 SimpleBeanTargetSource<br/>指向 scopedTarget.xxx
+    LSPFB->>PF: new ProxyFactory(targetSource)
+    LSPFB->>PF: setProxyTargetClass(true) → 启用 CGLIB
+    LSPFB->>PF: optimize=true
+    LSPFB->>PF: freezeProxy=true
+    LSPFB->>PF: getProxy(classLoader)
+    PF->>Proxy: CGLIB 生成目标类的子类
+    Proxy-->>LSPFB: 返回代理对象
+    LSPFB->>LSPFB: ((Advised)proxy).addAdvice(this)<br/>把自己注册为 MethodInterceptor
+    LSPFB-->>BF: FactoryBean.getObject() = 代理
+    BF-->>Caller: 注入代理（不是真实 Bean！）
+    Note over Caller: 此时真实 Bean 尚未实例化<br/>Caller 仅持有代理壳
+    end
+```
+
+#### (2) 创建过程流程图
+
+```mermaid
+flowchart TD
+    Start([应用启动]) --> S1[RefreshScope Bean 实例化<br/>作为 BeanFactoryPostProcessor]
+    S1 --> S2["postProcessBeanFactory()<br/>registerScope('refresh', this)"]
+    S2 --> S3[ClassPath 扫描<br/>AnnotatedBeanDefinitionReader 解析类]
+    S3 --> S4{"类标注 @RefreshScope?"}
+    S4 -->|否| S5[按普通 Bean 注册<br/>不进入此流程]
+    S4 -->|是| S6[解析 ScopeMetadata<br/>scope=refresh<br/>proxyMode=TARGET_CLASS]
+    S6 --> S7["注册原始 BD<br/>name=scopedTarget.xxx<br/>scope=refresh"]
+    S6 --> S8["注册代理 BD<br/>name=xxx<br/>class=ScopedProxyFactoryBean"]
+    S7 --> S9["GenericScope.postProcessBeanDefinitionRegistry()<br/>遍历所有 BeanDefinition"]
+    S8 --> S9
+    S9 --> S10{"class==ScopedProxyFactoryBean<br/>且 decorated scope==refresh?"}
+    S10 -->|否| S11[跳过]
+    S10 -->|是| S12["setBeanClass(LockedScopedProxyFactoryBean)<br/>加构造参数=scope<br/>setSynthetic(true)"]
+    S11 --> S13[注入阶段<br/>某 Bean 依赖注入 xxx]
+    S12 --> S13
+    S13 --> S14[BeanFactory 实例化<br/>LockedScopedProxyFactoryBean scope]
+    S14 --> S15["setTargetBeanName('scopedTarget.xxx')"]
+    S15 --> S16["setBeanFactory(this)<br/>super 创建 SimpleBeanTargetSource"]
+    S16 --> S17["new ProxyFactory(targetSource)<br/>setProxyTargetClass=true → CGLIB"]
+    S17 --> S18[getProxy 生成目标类的 CGLIB 子类代理]
+    S18 --> S19["(Advised)proxy.addAdvice(this)<br/>注册为 MethodInterceptor"]
+    S19 --> S20[FactoryBean.getObject 返回代理对象]
+    S20 --> S21[代理注入依赖位置]
+    S21 --> Done([代理 Bean 创建完成<br/>真实 Bean 延迟到首次方法调用才实例化<br/>方法调用流程见 3.3 节])
+
+    style S12 fill:#fff3cd
+    style S19 fill:#fff3cd
+    style Done fill:#d4edda
+```
+
+#### (3) 关键点说明
+
+| 阶段 | 关键动作 | 涉及组件 |
+|------|---------|---------|
+| ① 注册 Scope | `registerScope("refresh", this)` 让 Spring 知道 refresh scope 的处理器 | `RefreshScope` / `GenericScope` |
+| ② 双 BD 注册 | 一个 `@RefreshScope` 类生成**两个** BeanDefinition：`xxx`（代理）+ `scopedTarget.xxx`（真实 Bean） | `ScopedProxyCreator` |
+| ③ 替换工厂类 | 把默认 `ScopedProxyFactoryBean` 换成 `LockedScopedProxyFactoryBean`，注入 scope 引用作为构造参数 | `GenericScope.postProcessBeanDefinitionRegistry` |
+| ④ 生成代理 | `LockedScopedProxyFactoryBean` 借父类创建 `ProxyFactory` + CGLIB 代理，再把自身注册为 `MethodInterceptor` | `ScopedProxyFactoryBean` + CGLIB |
+
+> **核心结论**：真实 Bean 在阶段 4 中**没有被实例化**。`ScopedProxyFactoryBean` 只创建了代理壳，其 `SimpleBeanTargetSource` 只持有 `scopedTarget.xxx` 这个名字，要等到运行期方法调用时（见 3.3 节时序图），才通过 `scope.get(name, objectFactory)` 触发真实 Bean 的实例化。这就是为什么"刷新"能生效——重建时走完整 Spring 生命周期、按当前 Environment 重新解析 `@Value`。
+
 ---
 
 ## 四、刷新流程：ContextRefresher
