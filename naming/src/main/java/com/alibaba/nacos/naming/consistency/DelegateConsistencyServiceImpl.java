@@ -46,6 +46,7 @@ public class DelegateConsistencyServiceImpl implements ConsistencyService {
     }
 
     private ConsistencyService mapConsistencyService(String key) {
+        // 根据key判断是否为临时实例
         return KeyBuilder.matchEphemeralKey(key) ? ephemeralConsistencyService : persistentConsistencyService;
     }
     
