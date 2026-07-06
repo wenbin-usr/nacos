@@ -2733,3 +2733,609 @@ graph LR
 
 **文档版本**：基于 Nacos 1.4.8（分支 `develop-1.4.8`）源码分析
 **最后更新**：2026-07-06
+
+---
+
+## 十、Nacos 1.4.8 vs 2.4.2 CP 实现差异对比
+
+Nacos 2.4.2 的 CP（JRaft）实现相比 1.4.8 发生了**根本性的架构重构**。本章节深入对比两个版本的差异。
+
+### 10.1 整体架构对比
+
+```mermaid
+graph TB
+    subgraph "1.4.8 CP 架构"
+        direction TB
+        A1[PersistentConsistencyServiceDelegateImpl<br/>委托入口]
+        A2[ClusterVersionJudgement<br/>版本判断切换]
+        A3R[RaftConsistencyServiceImpl<br/>旧 HTTP Raft - 已废弃]
+        A3N[PersistentServiceProcessor<br/>新 JRaft 处理器]
+        A4[NamingKvStorage<br/>内存+文件 KV 存储]
+        A5[NamingSnapshotOperation<br/>zip 文件快照]
+        A6[单一 Raft Group<br/>naming_persistent_service]
+        A7[BatchWriteRequest<br/>KV 批量数据]
+
+        A1 --> A2
+        A2 -->|旧版本| A3R
+        A2 -->|新版本| A3N
+        A3N --> A4
+        A3N --> A5
+        A3N --> A6
+        A3N --> A7
+    end
+
+    subgraph "2.4.2 CP 架构"
+        direction TB
+        B1[业务服务直接注入 CPProtocol<br/>无委托层]
+        B2[DistributedDatabaseOperateImpl<br/>核心 CP 数据库处理器]
+        B3[DatabaseOperate<br/>SQL 数据库抽象]
+        B4[Derby / MySQL / PostgreSQL<br/>标准 SQL 数据库]
+        B5[DatabaseSnapshotOperation<br/>数据库快照]
+        B6[多 Raft Group<br/>按业务模块隔离]
+        B7[业务特定处理器<br/>PersistentClientOperationServiceImpl<br/>InstanceMetadataProcessor 等]
+        B8[SQL 事务复制<br/>ModifyRequest 列表]
+
+        B1 --> B2
+        B2 --> B3
+        B3 --> B4
+        B2 --> B5
+        B2 --> B6
+        B7 --> B2
+        B2 --> B8
+    end
+```
+
+### 10.2 核心架构变化
+
+#### 10.2.1 存储模型的根本性变化
+
+| 维度 | 1.4.8 | 2.4.2 |
+|------|-------|-------|
+| **存储类型** | KV 存储（`NamingKvStorage`） | SQL 数据库（Derby/MySQL/PostgreSQL） |
+| **存储层次** | 内存缓存 + 文件存储双层 | 关系型数据库（JDBC） |
+| **数据模型** | `Map<byte[], byte[]>` 键值对 | 关系表（行/列） |
+| **查询能力** | 仅 key 查找 | 标准 SQL 查询（支持 WHERE、JOIN 等） |
+| **事务支持** | 无事务（单次 batchPut） | 完整 ACID 事务 |
+| **持久化引擎** | 自研文件存储 | Spring JdbcTemplate + TransactionTemplate |
+
+**1.4.8 KV 存储示例**（`NamingKvStorage`）：
+
+```java
+public class NamingKvStorage extends MemoryKvStorage {
+    private final KvStorage baseDirStorage;  // 文件存储
+    private final Map<String, KvStorage> namespaceKvStorage;
+
+    public byte[] get(byte[] key) {
+        byte[] value = super.get(key);  // 先查内存
+        if (value != null) return value;
+        // 内存未命中，查文件存储
+        KvStorage actualStorage = createActualStorageIfAbsent(key);
+        return actualStorage.get(key);
+    }
+}
+```
+
+**2.4.2 SQL 存储示例**（`DistributedDatabaseOperateImpl`）：
+
+```java
+public class DistributedDatabaseOperateImpl extends RequestProcessor4CP {
+    private final DatabaseOperate databaseOperate;  // SQL 数据库
+
+    @Override
+    public Response onApply(WriteRequest request) {
+        // 反序列化 SQL 操作列表
+        final DistributedDatabaseOperation operation = serializer.deserialize(
+            request.getData().toByteArray(), DistributedDatabaseOperation.class);
+        // 执行 SQL 事务
+        final Boolean success = databaseOperate.update(operation.getRequests());
+        return Response.newBuilder().setSuccess(success).build();
+    }
+
+    @Override
+    public Response onRequest(ReadRequest request) {
+        // 直接执行 SQL 查询
+        final DistributedDatabaseQuery query = serializer.deserialize(...);
+        final List<Map<String, Object>> result = databaseOperate.queryMany(
+            query.getSql(), query.getArgs());
+        return Response.newBuilder().setSuccess(true).setData(...).build();
+    }
+}
+```
+
+#### 10.2.2 委托层与版本兼容的移除
+
+| 维度 | 1.4.8 | 2.4.2 |
+|------|-------|-------|
+| **委托层** | `PersistentConsistencyServiceDelegateImpl` | 无（业务直接注入） |
+| **版本判断** | `ClusterVersionJudgement` 每 5s 检查 | 移除 |
+| **旧 Raft 兼容** | 保留 `RaftConsistencyServiceImpl` | 完全移除 |
+| **切换机制** | 动态切换新旧实现 | 无需切换 |
+
+**1.4.8 委托模式**：
+
+```java
+public class PersistentConsistencyServiceDelegateImpl {
+    private volatile boolean switchNewPersistentService = false;
+
+    private PersistentConsistencyService switchOne() {
+        return switchNewPersistentService
+            ? newPersistentConsistencyService
+            : oldPersistentConsistencyService;
+    }
+}
+```
+
+**2.4.2 直接注入**：业务服务直接通过 `CPProtocol` 接口使用，无需委托层。
+
+#### 10.2.3 多 Raft Group 架构
+
+```mermaid
+graph LR
+    subgraph "1.4.8 单一 Raft Group"
+        A1[naming_persistent_service]
+        A1 --> A2[所有持久化数据共用<br/>服务实例+服务元数据+开关]
+    end
+
+    subgraph "2.4.2 多 Raft Group 隔离"
+        B1[naming_persistent_service_v2<br/>持久化实例]
+        B2[instance_metadata<br/>实例元数据]
+        B3[service_metadata<br/>服务元数据]
+        B4[switch_domain<br/>开关配置]
+        B5[lock_acquire_service_v2<br/>分布式锁]
+        B6[plugin_state<br/>插件状态]
+        B7[config 数据<br/>配置数据]
+    end
+```
+
+**2.4.2 多 Group 优势**：
+- **故障隔离**：一个 group 的故障不影响其他业务
+- **独立配置**：每个 group 可有不同的 Raft 参数
+- **并行性能**：不同 group 的日志复制互不阻塞
+- **独立快照**：每个 group 独立管理快照
+
+### 10.3 请求处理器模型变化
+
+#### 10.3.1 1.4.8：集中式处理器
+
+```mermaid
+graph TB
+    subgraph "1.4.8 集中式处理器"
+        A1[PersistentServiceProcessor<br/>处理所有 Naming 持久化数据]
+        A2[单一 group 方法<br/>返回 naming_persistent_service]
+        A3[BatchWriteRequest<br/>统一批量数据格式]
+        A4[onApply 统一处理<br/>按 key 路由到 KvStorage]
+
+        A1 --> A2
+        A1 --> A3
+        A1 --> A4
+    end
+```
+
+1.4.8 中所有 Naming 持久化数据由一个 `PersistentServiceProcessor` 处理，通过 `BatchWriteRequest` 统一封装。
+
+#### 10.3.2 2.4.2：分布式业务处理器
+
+```mermaid
+graph TB
+    subgraph "2.4.2 分布式业务处理器"
+        B1[DistributedDatabaseOperateImpl<br/>通用 SQL 处理器]
+        B2[PersistentClientOperationServiceImpl<br/>持久化客户端实例]
+        B3[InstanceMetadataProcessor<br/>实例元数据]
+        B4[ServiceMetadataProcessor<br/>服务元数据]
+        B5[SwitchManager<br/>开关配置]
+        B6[LockOperationServiceImpl<br/>分布式锁]
+        B7[PluginStateProcessor<br/>插件状态]
+
+        B1 --> B1A[SQL 事务复制]
+        B2 --> B2A[实例注册/注销]
+        B3 --> B3A[元数据增删改]
+        B4 --> B4A[服务元数据合并]
+        B5 --> B5A[开关配置更新]
+        B6 --> B6A[锁获取/释放]
+        B7 --> B7A[插件状态变更]
+    end
+```
+
+2.4.2 中每个业务模块注册自己的 `RequestProcessor4CP`，拥有独立的 Raft Group 和状态机。
+
+#### 10.3.3 处理器对比
+
+| 处理器 | 1.4.8 | 2.4.2 |
+|--------|-------|-------|
+| **持久化实例** | PersistentServiceProcessor | PersistentClientOperationServiceImpl |
+| **实例元数据** | PersistentServiceProcessor（共用） | InstanceMetadataProcessor |
+| **服务元数据** | PersistentServiceProcessor（共用） | ServiceMetadataProcessor |
+| **开关配置** | PersistentServiceProcessor（共用） | SwitchManager |
+| **分布式锁** | 无 | LockOperationServiceImpl |
+| **插件状态** | 无 | PluginStateProcessor |
+| **通用 SQL** | 无 | DistributedDatabaseOperateImpl |
+
+### 10.4 数据模型与序列化对比
+
+#### 10.4.1 数据载体
+
+```mermaid
+graph LR
+    subgraph "1.4.8 数据载体"
+        A1[BatchWriteRequest]
+        A2[keys: List~byte~~]
+        A3[values: List~byte~~]
+        A4[HessianSerializer 序列化]
+        A1 --> A2
+        A1 --> A3
+        A1 --> A4
+    end
+
+    subgraph "2.4.2 数据载体"
+        B1[DistributedDatabaseOperation]
+        B2[requests: List~ModifyRequest~]
+        B3[SQL 语句 + 参数]
+        B4[JacksonSerializer 序列化]
+        B1 --> B2
+        B1 --> B3
+        B1 --> B4
+    end
+```
+
+#### 10.4.2 SQL 事务复制机制（2.4.2 独有）
+
+2.4.2 的核心创新是**将 SQL 操作作为 Raft 日志的 payload**：
+
+```java
+// 2.4.2 写入流程
+public void update(String sql, Object... args) {
+    // 1. 构建 SQL 修改请求
+    ModifyRequest request = new ModifyRequest(sql, args);
+
+    // 2. 封装为 DistributedDatabaseOperation
+    DistributedDatabaseOperation operation = new DistributedDatabaseOperation();
+    operation.setRequests(Collections.singletonList(request));
+
+    // 3. 创建 WriteRequest
+    WriteRequest writeRequest = WriteRequest.newBuilder()
+        .setGroup(group)
+        .setData(ByteString.copyFrom(serializer.serialize(operation)))
+        .build();
+
+    // 4. 提交到 Raft
+    protocol.write(writeRequest);
+
+    // 5. Raft 复制后，onApply 在所有节点执行相同的 SQL
+}
+
+// onApply 在每个节点执行
+@Override
+public Response onApply(WriteRequest request) {
+    DistributedDatabaseOperation operation = serializer.deserialize(...);
+    // 所有节点执行相同的 SQL 语句
+    databaseOperate.update(operation.getRequests());
+    return Response.newBuilder().setSuccess(true).build();
+}
+```
+
+**优势**：
+- 所有节点执行相同 SQL，保证数据一致性
+- 利用数据库 ACID 特性
+- 支持 SQL 的所有能力（JOIN、事务、约束）
+
+### 10.5 快照机制对比
+
+```mermaid
+graph TB
+    subgraph "1.4.8 快照机制"
+        A1[NamingSnapshotOperation]
+        A2[存储层快照<br/>storage.doSnapshot]
+        A3[CRC64 校验 zip 压缩]
+        A4[LocalFileMeta 元数据]
+        A1 --> A2
+        A1 --> A3
+        A1 --> A4
+    end
+
+    subgraph "2.4.2 快照机制"
+        B1[DatabaseSnapshotOperation]
+        B2[AbstractSnapshotOperation 抽象基类]
+        B3[数据库导出<br/>SQL dump]
+        B4[压缩 + 校验]
+        B1 --> B2
+        B1 --> B3
+        B1 --> B4
+    end
+```
+
+| 快照维度 | 1.4.8 | 2.4.2 |
+|----------|-------|-------|
+| **快照类** | NamingSnapshotOperation | DatabaseSnapshotOperation |
+| **基类** | 直接实现 SnapshotOperation | 继承 AbstractSnapshotOperation |
+| **快照内容** | KV 存储目录 | SQL 数据库 dump |
+| **压缩格式** | zip + CRC64 | zip + 校验 |
+| **加载方式** | 解压到存储目录 | SQL 导入数据库 |
+| **触发间隔** | 30min（可配置） | 可配置 |
+
+### 10.6 读写流程对比
+
+#### 10.6.1 写入流程对比
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BIZ as 业务层
+
+    Note over BIZ: 1.4.8 写入流程
+    BIZ->>BIZ: PersistentServiceProcessor.put(key, value)
+    BIZ->>BIZ: BatchWriteRequest.append(key, datum)
+    BIZ->>BIZ: WriteRequest(group, op=Write)
+    BIZ->>BIZ: protocol.write(request)
+    Note over BIZ: Raft 复制 → onApply
+    BIZ->>BIZ: kvStorage.batchPut(keys, values)
+    BIZ->>BIZ: publishValueChangeEvent
+    BIZ->>BIZ: PersistentNotifier 通知监听器
+
+    Note over BIZ: 2.4.2 写入流程
+    BIZ->>BIZ: PersistentClientOperationServiceImpl.registerInstance()
+    BIZ->>BIZ: 构建 SQL + 参数
+    BIZ->>BIZ: DistributedDatabaseOperation
+    BIZ->>BIZ: WriteRequest(group, data=SQL操作)
+    BIZ->>BIZ: protocol.write(request)
+    Note over BIZ: Raft 复制 → onApply
+    BIZ->>BIZ: databaseOperate.update(SQL列表)
+    BIZ->>BIZ: 数据库执行事务
+    BIZ->>BIZ: NotifyCenter 发布业务事件
+```
+
+#### 10.6.2 读取流程对比
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BIZ as 业务层
+
+    Note over BIZ: 1.4.8 读取流程（ReadIndex）
+    BIZ->>BIZ: PersistentServiceProcessor.get(key)
+    BIZ->>BIZ: ReadRequest(group, keys)
+    BIZ->>BIZ: protocol.getData(req)
+    BIZ->>BIZ: node.readIndex() 线性一致性读
+    Note over BIZ: ReadIndex 成功后本地执行
+    BIZ->>BIZ: onRequest 反序列化 keys
+    BIZ->>BIZ: kvStorage.batchGet(keys)
+    BIZ-->>BIZ: Datum
+
+    Note over BIZ: 2.4.2 读取流程
+    BIZ->>BIZ: PersistentClientOperationServiceImpl.queryInstance()
+    BIZ->>BIZ: 直接执行 SQL 查询
+    BIZ->>BIZ: databaseOperate.queryMany(sql, args)
+    Note over BIZ: 本地数据库查询（无需 Raft）
+    BIZ-->>BIZ: List~Map~ 结果集
+```
+
+**关键差异**：
+- **1.4.8**：读操作也通过 Raft ReadIndex（线性一致性读）
+- **2.4.2**：读操作直接查本地数据库（最终一致性，性能更高）
+
+### 10.7 旧 Raft 兼容性处理
+
+| 维度 | 1.4.8 | 2.4.2 |
+|------|-------|-------|
+| **旧 Raft 实现** | 保留 `RaftConsistencyServiceImpl` | 完全移除 |
+| **ClusterVersionJudgement** | 存在，管理切换 | 移除 |
+| **版本兼容** | 支持 1.3.x 混合集群 | 仅支持 2.x 集群 |
+| **旧数据迁移** | 无 | `OldDataOperation` 适配枚举 |
+| **元数据清理** | `RaftListener.removeOldRaftMetadata` | 启动时自动清理 |
+
+### 10.8 持久化层抽象（2.4.2 新增）
+
+2.4.2 引入了独立的 `persistence` 模块，提供数据库操作抽象：
+
+```mermaid
+graph TB
+    subgraph "2.4.2 Persistence 模块"
+        A[DatabaseOperate 接口]
+        B[BaseDatabaseOperate 抽象实现]
+        C[StandaloneDatabaseOperateImpl<br/>单机模式]
+        D[ExternalDataSourceServiceImpl<br/>MySQL 外部数据源]
+        E[LocalDataSourceServiceImpl<br/>Derby 本地数据源]
+
+        A --> B
+        B --> C
+        B --> D
+        B --> E
+    end
+
+    subgraph "核心机制"
+        F[EmbeddedApplyHook<br/>Raft 应用后回调]
+        G[EmbeddedApplyHookHolder<br/>钩子持有者]
+        H[RaftDbErrorEvent<br/>数据库错误事件]
+    end
+
+    A --> F
+    F --> G
+    A --> H
+```
+
+**DatabaseOperate 接口**：
+
+```java
+public interface DatabaseOperate {
+    <T> T queryOne(String sql, Object... args);
+    <T> List<T> queryMany(String sql, Object... args);
+    Boolean update(List<ModifyRequest> requests);
+    void dataImport(Collection<ModifyRequest> requests);
+}
+```
+
+**EmbeddedApplyHook 机制**：
+
+```java
+public abstract class EmbeddedApplyHook {
+    protected EmbeddedApplyHook() {
+        EmbeddedApplyHookHolder.getInstance().register(this);
+    }
+    public abstract void afterApply(WriteRequest log);
+}
+```
+
+业务模块可以注册 `EmbeddedApplyHook`，在 Raft 日志应用后执行回调（如缓存更新、事件发布）。
+
+### 10.9 Raft Group 划分详细对比
+
+| Raft Group | 1.4.8 | 2.4.2 | 用途 |
+|------------|-------|-------|------|
+| `naming_persistent_service` | ✅ 单一 | - | 所有持久化数据 |
+| `naming_persistent_service_v2` | - | ✅ | 持久化实例 |
+| `instance_metadata` | - | ✅ | 实例元数据 |
+| `service_metadata` | - | ✅ | 服务元数据 |
+| `switch_domain` | - | ✅ | 开关配置 |
+| `lock_acquire_service_v2` | - | ✅ | 分布式锁 |
+| `plugin_state` | - | ✅ | 插件状态 |
+| config 相关 | 独立实现 | ✅ | 配置数据 |
+
+### 10.10 核心差异总结表
+
+| 维度 | 1.4.8 | 2.4.2 |
+|------|-------|-------|
+| **存储模型** | KV 存储（内存+文件） | SQL 数据库（Derby/MySQL/PostgreSQL） |
+| **数据格式** | `Map<byte[], byte[]>` | 关系表（SQL） |
+| **事务支持** | 无 | ACID 事务 |
+| **查询能力** | 仅 key 查找 | 完整 SQL |
+| **核心处理器** | PersistentServiceProcessor | DistributedDatabaseOperateImpl |
+| **处理器模型** | 集中式（一个处理器处理所有） | 分布式（每业务一个处理器） |
+| **Raft Group** | 单一 group | 多 group 隔离 |
+| **委托层** | PersistentConsistencyServiceDelegateImpl | 无 |
+| **旧 Raft 兼容** | 保留（ClusterVersionJudgement 切换） | 移除 |
+| **快照机制** | KV 目录 zip | SQL dump zip |
+| **读一致性** | ReadIndex 线性一致性 | 本地数据库读（最终一致） |
+| **序列化** | HessianSerializer | JacksonSerializer |
+| **数据载体** | BatchWriteRequest | DistributedDatabaseOperation |
+| **数据复制的单位** | Datum（key+value） | SQL 操作（ModifyRequest 列表） |
+| **持久化引擎** | 自研文件存储 | Spring JdbcTemplate |
+| **多数据库支持** | 无 | Derby/MySQL/PostgreSQL |
+| **业务隔离** | 无（共用 group） | 有（独立 group） |
+| **分布式锁** | 无 | LockOperationServiceImpl |
+| **插件状态** | 无 | PluginStateProcessor |
+| **EmbeddedApplyHook** | 无 | 有（Raft 应用后回调） |
+
+### 10.11 架构演进的设计意图
+
+#### 10.11.1 为何从 KV 转向 SQL
+
+1. **查询能力**：SQL 支持复杂查询（WHERE、JOIN、聚合），KV 仅支持 key 查找
+2. **事务保证**：SQL 提供 ACID 事务，避免部分更新
+3. **多数据库支持**：支持 MySQL/PostgreSQL，便于企业部署
+4. **数据一致性**：所有节点执行相同 SQL，天然保证一致
+5. **运维便利**：SQL 数据库有成熟的备份、监控工具
+
+#### 10.11.2 为何引入多 Raft Group
+
+1. **故障隔离**：锁服务的 Raft 故障不影响服务发现
+2. **独立配置**：高频写入的 group 可配置更短的选举超时
+3. **并行性能**：不同 group 的日志复制互不阻塞
+4. **独立快照**：每个 group 独立管理快照，避免大快照阻塞
+
+#### 10.11.3 为何移除旧 Raft 兼容
+
+1. **简化架构**：双实现并存增加复杂度，移除后代码更清晰
+2. **性能提升**：不再需要版本判断和切换开销
+3. **维护成本**：旧 Raft 已废弃，维护成本高
+4. **版本要求**：2.x 要求所有节点升级到 2.x，无需兼容 1.3.x
+
+#### 10.11.4 读一致性的权衡
+
+```mermaid
+graph LR
+    subgraph "1.4.8 读一致性"
+        A1[ReadIndex 线性一致性读]
+        A2[强一致但性能较低]
+        A3[每次读需 Raft 确认]
+    end
+
+    subgraph "2.4.2 读一致性"
+        B1[本地数据库读]
+        B2[最终一致但性能高]
+        B3[依赖 Raft 复制保证最终一致]
+    end
+```
+
+2.4.2 选择**最终一致性读**的设计权衡：
+- **性能优先**：读操作不经过 Raft，减少网络开销
+- **适用场景**：服务发现、配置查询等对实时性要求不高的场景
+- **一致性保证**：写操作仍通过 Raft 保证强一致，读操作跟随写入最终收敛
+
+### 10.12 源码文件对比索引
+
+#### 1.4.8 独有（2.4.2 已移除）
+
+| 文件 | 作用 |
+|------|------|
+| `PersistentConsistencyServiceDelegateImpl` | 委托层 |
+| `ClusterVersionJudgement` | 版本判断 |
+| `PersistentServiceProcessor` | 集中式处理器 |
+| `StandalonePersistentServiceProcessor` | 单机处理器 |
+| `BasePersistentServiceProcessor` | 基类 |
+| `NamingKvStorage` | KV 存储 |
+| `NamingSnapshotOperation` | KV 快照 |
+| `PersistentNotifier` | 通知器 |
+| `RaftConsistencyServiceImpl` | 旧 Raft 服务 |
+| `RaftCore` | 旧 Raft 核心 |
+| `RaftPeer` / `RaftPeerSet` | 旧节点管理 |
+| `RaftStore` | 旧文件存储 |
+| `RaftProxy` | 旧 HTTP 代理 |
+| `NacosLogProcessor` | 废弃的 Log 处理器 |
+| `NacosGetRequestProcessor` | 废弃的 Get 处理器 |
+
+#### 2.4.2 新增
+
+| 文件 | 作用 |
+|------|------|
+| `DistributedDatabaseOperateImpl` | 核心 SQL 处理器 |
+| `DatabaseOperate` | 数据库操作接口 |
+| `BaseDatabaseOperate` | 数据库操作基类 |
+| `StandaloneDatabaseOperateImpl` | 单机数据库实现 |
+| `EmbeddedApplyHook` | Raft 应用后回调 |
+| `EmbeddedApplyHookHolder` | 钩子持有者 |
+| `RaftDbErrorEvent` | 数据库错误事件 |
+| `PersistentClientOperationServiceImpl` | 持久化客户端 |
+| `InstanceMetadataProcessor` | 实例元数据处理器 |
+| `ServiceMetadataProcessor` | 服务元数据处理器 |
+| `SwitchManager` | 开关管理处理器 |
+| `LockOperationServiceImpl` | 分布式锁处理器 |
+| `PluginStateProcessor` | 插件状态处理器 |
+| `AbstractSnapshotOperation` | 抽象快照基类 |
+| `OldDataOperation` | 旧数据适配枚举 |
+
+### 10.13 演进总结
+
+```mermaid
+graph LR
+    subgraph "Nacos CP 演进路径"
+        A[1.4.8<br/>双实现并存<br/>KV 存储<br/>单一 Group]
+        B[2.4.2<br/>纯 JRaft<br/>SQL 数据库<br/>多 Group 隔离]
+
+        A -->|存储重构| A1[KV → SQL]
+        A -->|架构简化| A2[移除旧 Raft + 委托层]
+        A -->|模块化| A3[集中式 → 分布式处理器]
+        A -->|隔离性| A4[单一 Group → 多 Group]
+        A -->|读一致性| A5[ReadIndex → 本地读]
+
+        A1 --> B
+        A2 --> B
+        A3 --> B
+        A4 --> B
+        A5 --> B
+    end
+```
+
+**核心演进方向**：
+
+1. **存储现代化**：从自研 KV 存储转向标准 SQL 数据库
+2. **架构简洁化**：移除双实现并存的兼容包袱
+3. **模块隔离化**：多 Raft Group 实现业务隔离
+4. **扩展灵活化**：每业务模块注册独立处理器，易于扩展
+5. **性能优先化**：读操作本地化，降低 Raft 开销
+6. **运维标准化**：支持 MySQL/PostgreSQL，融入企业生态
+
+这一系列演进使得 Nacos 2.4.2 的 CP 实现在**可维护性、扩展性、性能和企业适配性**上都有显著提升，同时为后续的功能扩展（如分布式锁、AI 资源管理等）奠定了坚实基础。
+
+---
+
+**对比章节更新**：2026-07-06
+**对比范围**：Nacos 1.4.8（分支 `develop-1.4.8`） vs 2.4.2（分支 `develop`）
