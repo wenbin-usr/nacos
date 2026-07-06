@@ -63,10 +63,6 @@ public class PipelineExecutionRepositoryImpl implements PipelineExecutionReposit
     private static final String SQL_FIND_BY_ID =
         "SELECT * FROM pipeline_execution WHERE execution_id=?";
     
-    private static final String SQL_FIND_BY_RESOURCE = "SELECT * FROM pipeline_execution "
-        + "WHERE resource_type=? AND resource_name=? AND namespace_id=? AND version=? "
-        + "ORDER BY create_time DESC";
-    
     private static final PipelineExecutionRowMapper ROW_MAPPER = new PipelineExecutionRowMapper();
     
     private final JdbcTemplate injectedJdbcTemplate;
@@ -141,25 +137,6 @@ public class PipelineExecutionRepositoryImpl implements PipelineExecutionReposit
             return getJdbcTemplate().queryForObject(SQL_FIND_BY_ID, ROW_MAPPER, executionId);
         } catch (EmptyResultDataAccessException e) {
             return null;
-        } catch (DataAccessException e) {
-            LOGGER.warn("Failed to query pipeline_execution table (table may not exist): {}",
-                e.getMessage());
-            return null;
-        }
-    }
-    
-    @Override
-    public PipelineExecution findByResource(String resourceType, String resourceName,
-        String namespaceId,
-        String version) {
-        try {
-            List<PipelineExecution> executions =
-                getJdbcTemplate().query(SQL_FIND_BY_RESOURCE, ROW_MAPPER,
-                    resourceType, resourceName, namespaceId, version);
-            if (executions.isEmpty()) {
-                return null;
-            }
-            return executions.get(0);
         } catch (DataAccessException e) {
             LOGGER.warn("Failed to query pipeline_execution table (table may not exist): {}",
                 e.getMessage());
