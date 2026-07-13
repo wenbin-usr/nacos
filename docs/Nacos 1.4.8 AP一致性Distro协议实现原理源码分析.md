@@ -47,7 +47,7 @@ graph TB
             DS2[DataStore]
         end
 
-        C -->|HTTP/gRPC| CA1
+        C -->|HTTP| CA1
         CA1 --> DP1
         DP1 --> DTE1
         DTE1 --> DCS1
