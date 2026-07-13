@@ -2525,16 +2525,16 @@ graph LR
 ```mermaid
 graph TB
     subgraph "旧实现存储"
-        O1[JSON 文件<br/>data/naming/raft/cache/{key}]
-        O2[meta.properties<br/>term]
-        O3[加载时全量读入内存<br/>ConcurrentMap]
+        O1["JSON 文件<br/>data/naming/raft/cache/{key}"]
+        O2["meta.properties<br/>term"]
+        O3["加载时全量读入内存<br/>ConcurrentMap"]
     end
 
     subgraph "新实现存储"
-        N1[NamingKvStorage<br/>内存缓存 + 文件]
-        N2[JRaft Log<br/>data/protocol/raft/{group}/log]
-        N3[快照<br/>data/protocol/raft/{group}/snapshot]
-        N4[元数据<br/>data/protocol/raft/{group}/meta-data]
+        N1["NamingKvStorage<br/>内存缓存 + 文件"]
+        N2["JRaft Log<br/>data/protocol/raft/{group}/log"]
+        N3["快照<br/>data/protocol/raft/{group}/snapshot"]
+        N4["元数据<br/>data/protocol/raft/{group}/meta-data"]
         N1 --> N2
         N1 --> N3
     end
@@ -3339,3 +3339,218 @@ graph LR
 
 **对比章节更新**：2026-07-06
 **对比范围**：Nacos 1.4.8（分支 `develop-1.4.8`） vs 2.4.2（分支 `develop`）
+
+---
+
+## 十一、配置 Beta/灰度发布机制
+
+> 本章为配置中心业务功能，与 CP 一致性协议正交——Beta 发布在底层使用外置 MySQL 或内嵌 Derby+JRaft（参见第六章存储模式）时均适用。因同属 Nacos 配置中心范畴，作为扩展章节收录。
+
+### 11.1 概念澄清：Beta 发布即灰度发布
+
+在 Nacos 1.4.8 中，控制台的「Beta 发布」本质就是**基于 IP 列表的配置灰度发布**：发布时附带一组灰度 IP，仅这些 IP 的客户端收到新配置，其余客户端继续使用上一个正式版本。源码中唯一的 "grayscale" 字样出现在参数注释里，直接印证二者等价：
+
+```java
+// EmbeddedStorageContextUtils.java
+// @param betaIps    Receive client IP for grayscale configuration publishing
+```
+
+| 发布类型 | 引入版本 | 灰度粒度 | 1.4.8 是否支持 |
+|---------|---------|---------|--------------|
+| 正式发布 | 1.x | 全量 | ✅ |
+| **Beta 发布** | 1.x | **IP 列表**（`betaIps`） | ✅（本章重点） |
+| Tag 发布 | 1.x | 客户端 `tag` 标签 | ✅（见 11.6 附注） |
+| Gray 灰度发布 | 2.x+ | 规则表达式（region/version/自定义 label） | ❌ |
+
+> 注：1.4.8 的 Tag 发布是按客户端请求携带的 `tag` 参数推送不同配置，与 Beta 的 IP 灰度是两套独立机制；2.x 引入的 Gray 灰度（`GrayRule`/`grayName`）是基于标签表达式的更细粒度灰度，1.4.8 全仓搜索此类名零命中。
+
+### 11.2 数据模型：ConfigInfo4Beta
+
+**文件路径**：`config/src/main/java/com/alibaba/nacos/config/server/model/ConfigInfo4Beta.java`
+
+Beta 版配置继承正式配置，额外携带 `betaIps` 字段，与正式版**独立存储**（两份数据、两份缓存）：
+
+```java
+public class ConfigInfo4Beta extends ConfigInfo {
+
+    private String betaIps;   // 逗号分隔的灰度 IP 列表
+}
+```
+
+### 11.3 缓存模型：CacheItem 双版本
+
+**文件路径**：`config/src/main/java/com/alibaba/nacos/config/server/model/CacheItem.java`
+
+同一份配置的内存缓存同时持有**正式版与 Beta 版两套 MD5**，互不覆盖：
+
+```java
+public volatile String md5 = Constants.NULL;          // 正式版 MD5
+public volatile boolean isBeta = false;               // 是否存在 beta 版
+public volatile String md54Beta = Constants.NULL;      // beta 版 MD5
+public volatile List<String> ips4Beta;               // 灰度 IP 列表
+public volatile long lastModifiedTs4Beta;             // beta 版时间戳
+```
+
+设计要点：Beta 发布不覆盖正式版 `md5`，停止 Beta 后客户端能立即回退到正式版，无需重新发布。
+
+### 11.4 发布入口：ConfigController.publishConfig
+
+**文件路径**：`config/src/main/java/com/alibaba/nacos/config/server/controller/ConfigController.java`
+
+发布配置时从请求头 `betaIps` 读取灰度 IP，决定走普通发布还是 Beta 发布：
+
+```java
+String betaIps = request.getHeader("betaIps");
+ConfigInfo configInfo = new ConfigInfo(dataId, group, tenant, appName, content);
+if (StringUtils.isBlank(betaIps)) {
+    // 普通发布：insertOrUpdate，通知全量变更
+    persistService.insertOrUpdate(srcIp, srcUser, configInfo, time, configAdvanceInfo, true);
+    ConfigChangePublisher.notifyConfigChange(new ConfigDataChangeEvent(false, dataId, group, tenant, time.getTime()));
+} else {
+    // beta 发布：insertOrUpdateBeta，通知 beta 变更
+    persistService.insertOrUpdateBeta(configInfo, betaIps, srcIp, srcUser, time, true);
+    ConfigChangePublisher.notifyConfigChange(new ConfigDataChangeEvent(true, dataId, group, tenant, time.getTime()));
+}
+```
+
+`ConfigDataChangeEvent(true, ...)` 的第一个布尔参数 `beta=true` 是 Beta 变更的标识。
+
+### 11.5 落盘与缓存更新：dumpBeta / updateBetaMd5
+
+**文件路径**：`config/src/main/java/com/alibaba/nacos/config/server/service/ConfigCacheService.java`
+
+Beta 配置单独落盘，并更新 `CacheItem` 的 beta 字段，随后发布 `LocalDataChangeEvent`：
+
+```java
+public static boolean dumpBeta(String dataId, String group, String tenant, String content,
+        long lastModifiedTs, String betaIps) {
+    // ... 写锁
+    DiskUtil.saveBetaToDisk(dataId, group, tenant, content);   // 单独存 beta 文件
+    String[] betaIpsArr = betaIps.split(",");
+    updateBetaMd5(groupKey, md5, Arrays.asList(betaIpsArr), lastModifiedTs);
+}
+
+public static void updateBetaMd5(String groupKey, String md5, List<String> ips4Beta, long lastModifiedTs) {
+    final CacheItem cache = CACHE.get(groupKey);
+    if (cache.md54Beta == null || !cache.md54Beta.equals(md5) || !ips4Beta.equals(cache.ips4Beta)) {
+        cache.isBeta = true;
+        cache.md54Beta = md5;
+        cache.lastModifiedTs4Beta = lastModifiedTs;
+        cache.ips4Beta = ips4Beta;
+        // 发布变更事件：isBeta=true，附带灰度 IP
+        NotifyCenter.publishEvent(new LocalDataChangeEvent(groupKey, true, ips4Beta));
+    }
+}
+```
+
+### 11.6 推送过滤：LongPollingService.DataChangeTask
+
+**文件路径**：`config/src/main/java/com/alibaba/nacos/config/server/service/LongPollingService.java`
+
+Beta 变更事件触发 `DataChangeTask`，遍历所有长轮询客户端，**逐个 IP 过滤**——不在灰度名单中的客户端被跳过，收不到任何通知：
+
+```java
+ConfigExecutor.executeLongPolling(new DataChangeTask(evt.groupKey, evt.isBeta, evt.betaIps));
+
+class DataChangeTask implements Runnable {
+    public void run() {
+        for (Iterator<ClientLongPolling> iter = allSubs.iterator(); iter.hasNext(); ) {
+            ClientLongPolling clientSub = iter.next();
+            if (clientSub.clientMd5Map.containsKey(groupKey)) {
+                // 非灰度 IP 直接跳过，不发变更通知
+                if (isBeta && !CollectionUtils.contains(betaIps, clientSub.ip)) {
+                    continue;
+                }
+                // ... 通知该客户端配置变更
+                clientSub.sendResponse(Arrays.asList(groupKey));
+            }
+        }
+    }
+}
+```
+
+> 附注（Tag 发布）：同一处还有 `tag` 过滤逻辑——`if (StringUtils.isNotBlank(tag) && !tag.equals(clientSub.tag)) continue;`，这是 1.4.8 的另一种定向推送机制，按客户端携带的 `tag` 推送不同配置内容，与 Beta 的 IP 灰度并列。
+
+### 11.7 拉取分发：getContentMd5
+
+**文件路径**：`config/src/main/java/com/alibaba/nacos/config/server/service/ConfigCacheService.java`
+
+客户端发起长轮询/拉取配置时，服务端按请求 IP 返回不同版本的 MD5，从而让灰度客户端与普通客户端看到不同配置：
+
+```java
+public static String getContentMd5(String groupKey, String ip, String tag) {
+    CacheItem item = CACHE.get(groupKey);
+    if (item != null && item.isBeta) {
+        if (item.ips4Beta.contains(ip)) {
+            return item.md54Beta;   // 灰度 IP → 返回 beta 版 MD5
+        }
+    }
+    // ... tag 分支
+    return (null != item) ? item.md5 : Constants.NULL;   // 否则返回正式版 MD5
+}
+```
+
+灰度客户端比对 MD5 发现不一致 → 主动拉取 beta 版配置内容；普通客户端 MD5 一致 → 无感知。
+
+### 11.8 停止 Beta：stopBeta
+
+**文件路径**：`config/src/main/java/com/alibaba/nacos/config/server/controller/ConfigController.java`
+
+```java
+@DeleteMapping(params = "beta=true")
+public RestResult<Boolean> stopBeta(@RequestParam("dataId") String dataId,
+        @RequestParam("group") String group, @RequestParam(value = "tenant", required = false) String tenant) {
+    persistService.removeConfigInfo4Beta(dataId, group, tenant);
+}
+```
+
+`ConfigCacheService.removeBeta` 清空 beta 缓存并通知灰度客户端回退：
+
+```java
+public static boolean removeBeta(String dataId, String group, String tenant) {
+    // ... 写锁
+    DiskUtil.removeConfigInfo4Beta(dataId, group, tenant);
+    NotifyCenter.publishEvent(new LocalDataChangeEvent(groupKey, true, CACHE.get(groupKey).getIps4Beta()));
+    CACHE.get(groupKey).setBeta(false);
+    CACHE.get(groupKey).setIps4Beta(null);
+    CACHE.get(groupKey).setMd54Beta(Constants.NULL);
+}
+```
+
+灰度客户端收到回退通知后，再次拉取时返回正式版 MD5，自动回退到正式版本。
+
+### 11.9 整体流程
+
+```mermaid
+flowchart TD
+    A["控制台 Beta 发布<br/>header: betaIps"] --> B["insertOrUpdateBeta<br/>存 ConfigInfo4Beta"]
+    B --> C["dumpBeta 落盘<br/>+ updateBetaMd5 更新 CacheItem"]
+    C --> D["发布 LocalDataChangeEvent<br/>isBeta=true, ips4Beta"]
+    D --> E["DataChangeTask 遍历长轮询客户端"]
+    E --> F{"客户端 IP ∈ betaIps?"}
+    F -->|是| G["通知该客户端配置变更"]
+    F -->|否| H["跳过<br/>客户端无感知，仍用正式版"]
+    G --> I["灰度客户端拉取<br/>getContentMd5 返回 md54Beta"]
+    I --> J["客户端比对 MD5 不一致<br/>拉取 beta 版配置内容"]
+    K["stopBeta 停止灰度"] --> L["removeConfigInfo4Beta<br/>+ 清空 CacheItem beta 字段"]
+    L --> M["通知灰度客户端回退"]
+    M --> N["灰度客户端再次拉取<br/>返回正式版 md5，回退"]
+```
+
+### 11.10 源码文件索引（配置 Beta 相关）
+
+| 文件 | 职责 |
+|------|------|
+| `ConfigController.java` | 发布/查询/停止 Beta 的 HTTP 入口 |
+| `ConfigInfo4Beta.java` | Beta 版配置数据模型 |
+| `CacheItem.java` | 内存缓存，双版本 MD5 |
+| `ConfigCacheService.java` | dumpBeta / updateBetaMd5 / getContentMd5 / removeBeta |
+| `LongPollingService.java` | DataChangeTask，按 IP 过滤推送 |
+| `DiskUtil.java` | Beta 配置文件落盘 |
+| `PersistService` | insertOrUpdateBeta / removeConfigInfo4Beta / findConfigInfo4Beta |
+| `DumpAllBetaProcessor.java` | 全量 dump 时处理 Beta 配置 |
+
+---
+
+**章节更新**：2026-07-07
+**适用范围**：Nacos 1.4.8（分支 `develop-1.4.8`）配置中心 Beta 发布机制
