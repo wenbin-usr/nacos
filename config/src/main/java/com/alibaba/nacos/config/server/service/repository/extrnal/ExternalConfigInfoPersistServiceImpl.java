@@ -49,6 +49,8 @@ import com.alibaba.nacos.plugin.datasource.constants.CommonConstant;
 import com.alibaba.nacos.plugin.datasource.constants.ContextConstant;
 import com.alibaba.nacos.plugin.datasource.constants.FieldConstant;
 import com.alibaba.nacos.plugin.datasource.constants.TableConstant;
+import com.alibaba.nacos.plugin.datasource.dialect.DatabaseDialect;
+import com.alibaba.nacos.plugin.datasource.manager.DatabaseDialectManager;
 import com.alibaba.nacos.plugin.datasource.mapper.ConfigInfoMapper;
 import com.alibaba.nacos.plugin.datasource.mapper.ConfigTagsRelationMapper;
 import com.alibaba.nacos.plugin.datasource.model.MapperContext;
@@ -83,6 +85,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 import static com.alibaba.nacos.config.server.service.repository.ConfigRowMapperInjector.CONFIG_ADVANCE_INFO_ROW_MAPPER;
 import static com.alibaba.nacos.config.server.service.repository.ConfigRowMapperInjector.CONFIG_ALL_INFO_ROW_MAPPER;
@@ -309,6 +312,13 @@ public class ExternalConfigInfoPersistServiceImpl implements ConfigInfoPersistSe
     }
     
     private boolean isDuplicateKeyException(Throwable exception) {
+        DatabaseDialect dialect = resolveDatabaseDialect();
+        if (dialect != null) {
+            return dialect.isDuplicateKeyException(exception);
+        }
+        // Fallback when no dialect can be resolved (for example before datasource plugins are
+        // loaded): keep the database-agnostic Spring DuplicateKeyException classification, which is
+        // exactly what the active dialect applies as its default behavior.
         Throwable cause = exception;
         while (cause != null) {
             if (cause instanceof DuplicateKeyException) {
@@ -317,6 +327,28 @@ public class ExternalConfigInfoPersistServiceImpl implements ConfigInfoPersistSe
             cause = cause.getCause();
         }
         return false;
+    }
+    
+    /**
+     * Resolve the active datasource dialect for duplicate-key classification.
+     *
+     * <p>All duplicate-key judgement is delegated to {@link DatabaseDialect#isDuplicateKeyException},
+     * whose default already recognizes Spring {@link DuplicateKeyException} and which vendor dialects
+     * may extend with driver-specific detection. Returns {@code null} when no dialect can be resolved
+     * (for example before datasource plugins are loaded), so the caller falls back to the
+     * database-agnostic Spring classification.
+     *
+     * @return the active dialect, or {@code null} when it cannot be resolved
+     */
+    DatabaseDialect resolveDatabaseDialect() {
+        try {
+            return DatabaseDialectManager.getInstance()
+                .getDialect(dataSourceService.getDataSourceType());
+        } catch (IllegalStateException stateException) {
+            LogUtil.DEFAULT_LOG.warn("[duplicate-key] cannot resolve datasource dialect, fallback "
+                + "to spring-standard classification, msg: {}", stateException.getMessage());
+            return null;
+        }
     }
     
     @Override
@@ -1297,6 +1329,9 @@ public class ExternalConfigInfoPersistServiceImpl implements ConfigInfoPersistSe
         MapperContext context = new MapperContext();
         if (!CollectionUtils.isEmpty(ids)) {
             context.putWhereParameter(FieldConstant.IDS, ids);
+            if (tenant != null) {
+                context.putWhereParameter(FieldConstant.TENANT_ID, tenantTmp);
+            }
         } else {
             context.putWhereParameter(FieldConstant.TENANT_ID, tenantTmp);
             if (!StringUtils.isBlank(dataId)) {
@@ -1317,6 +1352,12 @@ public class ExternalConfigInfoPersistServiceImpl implements ConfigInfoPersistSe
             
             if (CollectionUtils.isEmpty(configAllInfos)) {
                 return configAllInfos;
+            }
+            if (!CollectionUtils.isEmpty(ids) && tenant != null) {
+                configAllInfos = configAllInfos.stream()
+                    .filter(configAllInfo -> StringUtils.equals(tenantTmp,
+                        configAllInfo.getTenant()))
+                    .collect(Collectors.toList());
             }
             for (ConfigAllInfo configAllInfo : configAllInfos) {
                 List<String> configTagList =
