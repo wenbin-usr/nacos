@@ -31,19 +31,19 @@ Java 客户端为默认插件暴露的用户名/密码和 token 流程提供
 默认实现用于在可信内网环境中降低误用风险。它不是面向恶意公网环境的完整强鉴权方案。
 如果需要暴露到公网，应使用外部安全边界，或选择更强的鉴权插件。
 
-## 模块配置
+## 鉴权框架配置
 
 | 配置 | 目的 |
 |------|------|
 | `nacos.core.auth.enabled` | 启用通用鉴权系统和 Open API 鉴权。 |
 | `nacos.core.auth.admin.enabled` | 启用 Admin API 鉴权。 |
 | `nacos.core.auth.console.enabled` | 启用 Console API 鉴权和默认登录行为。 |
-| `nacos.core.auth.system.type` | 选择鉴权插件，默认 `nacos`。 |
+| `nacos.plugin.auth.type` | 启动时选择鉴权插件，默认 `nacos`；`nacos.core.auth.system.type` 是历史 alias。 |
 | `nacos.core.auth.server.identity.key` | 服务端之间调用的身份 key。 |
 | `nacos.core.auth.server.identity.value` | 服务端之间调用的身份 value。 |
 
-这些配置负责鉴权模块、API 范围、插件选择和服务端身份，不属于 `auth:nacos` 插件自身的
-配置项。服务端身份值必须由部署环境独立配置。
+这些配置负责鉴权模块、API 范围、启动期插件选择和服务端身份，不属于 `auth:nacos` 插件
+自身的配置项。插件选择需要重启生效，服务端身份值必须由部署环境独立配置。
 
 ## 统一管理的插件配置
 
@@ -119,6 +119,12 @@ token 签名和有效期、Nacos 用户与角色存储及授权仍使用 `auth:n
 - 端点标记该请求允许匿名访问。
 - `auth:nacos` 的 `anonymous.ai.enabled` 已启用。
 - 默认插件将请求接受为内置匿名身份。
+
+只有当请求没有显式提供任何默认鉴权凭据 key 时，才允许降级为匿名身份。提供
+`Authorization`、`accessToken`、`username` 或 `password` 都视为显式凭据存在，
+即使对应值为空白也一样。如果这些凭据为空白或无效，插件必须返回认证失败，而不能降级为
+匿名身份。在 HTTP 过滤器层，身份或权限校验失败会被转换为 HTTP 403 的
+`ACCESS_DENIED` 响应；插件级失败码和消息可以保留在响应详情中。
 
 开启匿名访问后，只会立即开启匿名身份接受。后台协调任务随后保证保留的匿名用户和角色
 存在；首次初始化时增加 `public:*:ai/*` 读权限，并最后写入匿名角色绑定，将该绑定作为

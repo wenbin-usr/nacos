@@ -38,20 +38,21 @@ internal networks. It is not a full strong-auth solution for hostile public
 networks. Public exposure requires an external security boundary or a stronger
 auth plugin.
 
-## Module Configuration
+## Auth Framework Configuration
 
 | Configuration | Purpose |
 |---------------|---------|
 | `nacos.core.auth.enabled` | Enable the general auth system and Open API auth. |
 | `nacos.core.auth.admin.enabled` | Enable Admin API auth. |
 | `nacos.core.auth.console.enabled` | Enable Console API auth and default login behavior. |
-| `nacos.core.auth.system.type` | Select the auth plugin, default `nacos`. |
+| `nacos.plugin.auth.type` | Select the auth plugin at startup, default `nacos`; `nacos.core.auth.system.type` is the legacy alias. |
 | `nacos.core.auth.server.identity.key` | Server-to-server identity key. |
 | `nacos.core.auth.server.identity.value` | Server-to-server identity value. |
 
-These settings control the auth module, API scopes, plugin selection, and
-server identity. They are not configuration items owned by `auth:nacos`.
-Server identity values must be deployment-specific.
+These settings control the auth module, API scopes, startup plugin selection,
+and server identity. They are not configuration items owned by `auth:nacos`.
+Plugin selection requires restart. Server identity values must be
+deployment-specific.
 
 ## Managed Plugin Configuration
 
@@ -142,6 +143,16 @@ Anonymous AI access is allowed only when all of these are true:
 - The endpoint marks the request as allowing anonymous access.
 - `anonymous.ai.enabled` is enabled in `auth:nacos` configuration.
 - The default plugin accepts the request as the built-in anonymous identity.
+
+Anonymous fallback is available only when the request does not explicitly
+supply any default-auth credential key. Supplying `Authorization`,
+`accessToken`, `username`, or `password` counts as explicit credential
+presence even when the supplied value is blank. If such a credential is blank
+or invalid, the plugin must return an authentication failure instead of
+falling back to anonymous identity. At the HTTP filter layer, failed identity
+or authority results are converted to an `ACCESS_DENIED` response with HTTP
+403; the plugin-level failure code and message may remain visible in the
+response detail.
 
 Enabling anonymous access immediately enables only identity acceptance. A
 background reconciler then ensures the reserved anonymous user and role exist.
