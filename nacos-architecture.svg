@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1220" viewBox="0 0 1440 1220" font-family="'Segoe UI','Microsoft YaHei','PingFang SC',Helvetica,Arial,sans-serif">
+  <!-- ============================ Background ============================ -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f7f9fc"/>
+      <stop offset="1" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2.2"/>
+      <feOffset dx="0" dy="2" result="o"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.18"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9aa4b2"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1440" height="1220" fill="url(#bg)"/>
+
+  <!-- ============================ Title ============================ -->
+  <text x="720" y="48" text-anchor="middle" font-size="28" font-weight="700" fill="#1f2937">Nacos 整体架构</text>
+  <text x="720" y="74" text-anchor="middle" font-size="14" fill="#6b7280">Dynamic Naming &amp; Configuration Service · 服务发现 / 配置管理 / AI Agent 注册中心</text>
+
+  <!-- ============================ Helper: layer band + label ============================ -->
+  <!-- Layer 1 : Client & UI -->
+  <rect x="60" y="95" width="1320" height="92" rx="10" fill="#ffffff" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="60" y="95" width="6" height="92" rx="3" fill="#3b82f6"/>
+  <text x="80" y="118" font-size="13" font-weight="700" fill="#1e3a8a">客户端 &amp; UI 层</text>
+  <text x="80" y="135" font-size="11" fill="#6b7280">Client &amp; UI</text>
+
+  <!-- L1 boxes -->
+  <g filter="url(#shadow)">
+    <rect x="220" y="118" width="220" height="56" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="330" y="128" text-anchor="middle" font-size="14" font-weight="600" fill="#1e3a8a">Java SDK</text>
+    <text x="330" y="160" text-anchor="middle" font-size="11" fill="#475569">Naming / Config / AI 客户端</text>
+
+    <rect x="480" y="118" width="220" height="56" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="590" y="142" text-anchor="middle" font-size="14" font-weight="600" fill="#1e3a8a">OpenAPI / gRPC Client</text>
+    <text x="590" y="160" text-anchor="middle" font-size="11" fill="#475569">多语言 HTTP 调用</text>
+
+    <rect x="740" y="118" width="220" height="56" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="850" y="142" text-anchor="middle" font-size="14" font-weight="600" fill="#1e3a8a">Maintainer Client</text>
+    <text x="850" y="160" text-anchor="middle" font-size="11" fill="#475569">运维管控客户端</text>
+
+    <rect x="1000" y="118" width="220" height="56" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="1110" y="142" text-anchor="middle" font-size="14" font-weight="600" fill="#1e3a8a">Console UI (React)</text>
+    <text x="1110" y="160" text-anchor="middle" font-size="11" fill="#475569">Web 控制台前端</text>
+  </g>
+
+  <!-- arrow L1 -> L2 -->
+  <line x1="720" y1="190" x2="720" y2="214" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Layer 2 : Communication -->
+  <rect x="60" y="218" width="1320" height="78" rx="10" fill="#ffffff" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="60" y="218" width="6" height="78" rx="3" fill="#f59e0b"/>
+  <text x="80" y="241" font-size="13" font-weight="700" fill="#78350f">通信层</text>
+  <text x="80" y="258" font-size="11" fill="#6b7280">Communication</text>
+
+  <g filter="url(#shadow)">
+    <rect x="410" y="235" width="280" height="50" rx="8" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="550" y="256" text-anchor="middle" font-size="14" font-weight="600" fill="#78350f">gRPC（主通信协议）</text>
+    <text x="550" y="274" text-anchor="middle" font-size="11" fill="#7c5410">长连接 · 双向流 · 客户端推送</text>
+
+    <rect x="750" y="235" width="280" height="50" rx="8" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="890" y="256" text-anchor="middle" font-size="14" font-weight="600" fill="#78350f">HTTP / REST（兼容协议）</text>
+    <text x="890" y="274" text-anchor="middle" font-size="11" fill="#7c5410">V3 OpenAPI · /v3/{client|admin|console}</text>
+  </g>
+
+  <!-- arrow L2 -> L3 -->
+  <line x1="720" y1="300" x2="720" y2="324" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Layer 3 : Access & Filter -->
+  <rect x="60" y="328" width="1320" height="92" rx="10" fill="#ffffff" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="60" y="328" width="6" height="92" rx="3" fill="#ec4899"/>
+  <text x="80" y="351" font-size="13" font-weight="700" fill="#831843">访问 &amp; 过滤层</text>
+  <text x="80" y="368" font-size="11" fill="#6b7280">Access / Filter</text>
+
+  <g filter="url(#shadow)">
+    <rect x="180" y="351" width="200" height="56" rx="8" fill="#fdf2f8" stroke="#ec4899" stroke-width="1.5"/>
+    <text x="280" y="375" text-anchor="middle" font-size="14" font-weight="600" fill="#831843">Auth Filter</text>
+    <text x="280" y="393" text-anchor="middle" font-size="11" fill="#7a3a52">@Secured · 鉴权 / 签名</text>
+
+    <rect x="420" y="351" width="200" height="56" rx="8" fill="#fdf2f8" stroke="#ec4899" stroke-width="1.5"/>
+    <text x="520" y="375" text-anchor="middle" font-size="14" font-weight="600" fill="#831843">Param Check</text>
+    <text x="520" y="393" text-anchor="middle" font-size="11" fill="#7a3a52">参数校验 · paramcheck</text>
+
+    <rect x="660" y="351" width="200" height="56" rx="8" fill="#fdf2f8" stroke="#ec4899" stroke-width="1.5"/>
+    <text x="760" y="375" text-anchor="middle" font-size="14" font-weight="600" fill="#831843">Request Context</text>
+    <text x="760" y="393" text-anchor="middle" font-size="11" fill="#7a3a52">请求上下文 · 过滤链</text>
+
+    <rect x="900" y="351" width="200" height="56" rx="8" fill="#fdf2f8" stroke="#ec4899" stroke-width="1.5"/>
+    <text x="1000" y="375" text-anchor="middle" font-size="14" font-weight="600" fill="#831843">Flow Control</text>
+    <text x="1000" y="393" text-anchor="middle" font-size="11" fill="#7a3a52">限流 · 控制 · control</text>
+
+    <rect x="1140" y="351" width="200" height="56" rx="8" fill="#fdf2f8" stroke="#ec4899" stroke-width="1.5"/>
+    <text x="1240" y="375" text-anchor="middle" font-size="14" font-weight="600" fill="#831843">Remote / gRPC Srv</text>
+    <text x="1240" y="393" text-anchor="middle" font-size="11" fill="#7a3a52">连接 · 能力协商</text>
+  </g>
+
+  <!-- arrow L3 -> L4 -->
+  <line x1="720" y1="424" x2="720" y2="448" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Layer 4 : Console Backend -->
+  <rect x="60" y="452" width="1320" height="80" rx="10" fill="#ffffff" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="60" y="452" width="6" height="80" rx="3" fill="#6366f1"/>
+  <text x="80" y="475" font-size="13" font-weight="700" fill="#312e81">控制台后端</text>
+  <text x="80" y="492" font-size="11" fill="#6b7280">Console (Spring Boot)</text>
+
+  <g filter="url(#shadow)">
+    <rect x="320" y="470" width="240" height="50" rx="8" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="440" y="491" text-anchor="middle" font-size="14" font-weight="600" fill="#312e81">Console Controller</text>
+    <text x="440" y="509" text-anchor="middle" font-size="11" fill="#4a4a8a">/v3/console/**</text>
+
+    <rect x="600" y="470" width="240" height="50" rx="8" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="720" y="491" text-anchor="middle" font-size="14" font-weight="600" fill="#312e81">Console Proxy / Handler</text>
+    <text x="720" y="509" text-anchor="middle" font-size="11" fill="#4a4a8a">代理 · 异常处理 · AOT</text>
+
+    <rect x="880" y="470" width="240" height="50" rx="8" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="1000" y="491" text-anchor="middle" font-size="14" font-weight="600" fill="#312e81">Namespace / Cluster View</text>
+    <text x="1000" y="509" text-anchor="middle" font-size="11" fill="#4a4a8a">命名空间 · 集群视图</text>
+  </g>
+
+  <!-- arrow L4 -> L5 -->
+  <line x1="720" y1="536" x2="720" y2="560" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Layer 5 : Core Services -->
+  <rect x="60" y="564" width="1320" height="108" rx="10" fill="#ffffff" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="60" y="564" width="6" height="108" rx="3" fill="#10b981"/>
+  <text x="80" y="587" font-size="13" font-weight="700" fill="#064e3b">核心业务模块</text>
+  <text x="80" y="604" font-size="11" fill="#6b7280">Core Services</text>
+
+  <g filter="url(#shadow)">
+    <rect x="160" y="588" width="220" height="74" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+    <text x="270" y="612" text-anchor="middle" font-size="14" font-weight="700" fill="#064e3b">Naming 服务发现</text>
+    <text x="270" y="630" text-anchor="middle" font-size="11" fill="#0f6b53">注册 · 发现 · 订阅 · 推送</text>
+    <text x="270" y="646" text-anchor="middle" font-size="11" fill="#0f6b53">健康检查 · 元数据 · Selector</text>
+
+    <rect x="410" y="588" width="220" height="74" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+    <text x="520" y="612" text-anchor="middle" font-size="14" font-weight="700" fill="#064e3b">Config 配置管理</text>
+    <text x="520" y="630" text-anchor="middle" font-size="11" fill="#0f6b53">发布 · 查询 · 监听 · 灰度</text>
+    <text x="520" y="646" text-anchor="middle" font-size="11" fill="#0f6b53">历史 · 容量 · Dump · 一致性</text>
+
+    <rect x="660" y="588" width="220" height="74" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+    <text x="770" y="612" text-anchor="middle" font-size="14" font-weight="700" fill="#064e3b">AI Registry 注册中心</text>
+    <text x="770" y="630" text-anchor="middle" font-size="11" fill="#0f6b53">Prompt · MCP · A2A · Skill</text>
+    <text x="770" y="646" text-anchor="middle" font-size="11" fill="#0f6b53">AgentSpec · Agent 管理 · RAD</text>
+
+    <rect x="910" y="588" width="220" height="74" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+    <text x="1020" y="612" text-anchor="middle" font-size="14" font-weight="700" fill="#064e3b">Core 核心</text>
+    <text x="1020" y="630" text-anchor="middle" font-size="11" fill="#0f6b53">集群 · 命名空间 · 权限</text>
+    <text x="1020" y="646" text-anchor="middle" font-size="11" fill="#0f6b53">分布式 ID · 监控 · Trace</text>
+
+    <rect x="1160" y="588" width="220" height="74" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+    <text x="1270" y="612" text-anchor="middle" font-size="14" font-weight="700" fill="#064e3b">Lock 分布式锁</text>
+    <text x="1270" y="630" text-anchor="middle" font-size="11" fill="#0f6b53">基于 Raft 的互斥锁</text>
+    <text x="1270" y="646" text-anchor="middle" font-size="11" fill="#0f6b53">自动过期 · 可重入</text>
+  </g>
+
+  <!-- arrow L5 -> L6 -->
+  <line x1="720" y1="676" x2="720" y2="700" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Layer 6 : Consistency -->
+  <rect x="60" y="704" width="1320" height="86" rx="10" fill="#ffffff" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="60" y="704" width="6" height="86" rx="3" fill="#8b5cf6"/>
+  <text x="80" y="727" font-size="13" font-weight="700" fill="#4c1d95">一致性协议层</text>
+  <text x="80" y="744" font-size="11" fill="#6b7280">Consistency</text>
+
+  <g filter="url(#shadow)">
+    <rect x="360" y="722" width="320" height="56" rx="8" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/>
+    <text x="520" y="746" text-anchor="middle" font-size="14" font-weight="700" fill="#4c1d95">Distro（AP 协议）</text>
+    <text x="520" y="764" text-anchor="middle" font-size="11" fill="#5b3a8c">临时数据 · 最终一致 · 节点对等同步</text>
+
+    <rect x="760" y="722" width="320" height="56" rx="8" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/>
+    <text x="920" y="746" text-anchor="middle" font-size="14" font-weight="700" fill="#4c1d95">Raft / JRaft（CP 协议）</text>
+    <text x="920" y="764" text-anchor="middle" font-size="11" fill="#5b3a8c">持久数据 · 强一致 · Leader 选举</text>
+  </g>
+
+  <!-- arrow L6 -> L7 -->
+  <line x1="720" y1="794" x2="720" y2="818" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Layer 7 : Plugin SPI -->
+  <rect x="60" y="822" width="1320" height="120" rx="10" fill="#ffffff" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="60" y="822" width="6" height="120" rx="3" fill="#eab308"/>
+  <text x="80" y="845" font-size="13" font-weight="700" fill="#713f12">插件 SPI 层</text>
+  <text x="80" y="862" font-size="11" fill="#6b7280">Plugin (Java SPI)</text>
+
+  <g filter="url(#shadow)">
+    <!-- row 1 -->
+    <rect x="170" y="843" width="200" height="44" rx="8" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+    <text x="270" y="870" text-anchor="middle" font-size="13" font-weight="600" fill="#713f12">Auth 鉴权插件</text>
+
+    <rect x="390" y="843" width="200" height="44" rx="8" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+    <text x="490" y="870" text-anchor="middle" font-size="13" font-weight="600" fill="#713f12">Visibility 可见性</text>
+
+    <rect x="610" y="843" width="200" height="44" rx="8" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+    <text x="710" y="870" text-anchor="middle" font-size="13" font-weight="600" fill="#713f12">Datasource 方言</text>
+
+    <rect x="830" y="843" width="200" height="44" rx="8" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+    <text x="930" y="870" text-anchor="middle" font-size="13" font-weight="600" fill="#713f12">Encryption 加密</text>
+
+    <rect x="1050" y="843" width="200" height="44" rx="8" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+    <text x="1150" y="870" text-anchor="middle" font-size="13" font-weight="600" fill="#713f12">Trace 链路</text>
+
+    <!-- row 2 -->
+    <rect x="170" y="892" width="200" height="44" rx="8" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+    <text x="270" y="919" text-anchor="middle" font-size="13" font-weight="600" fill="#713f12">Environment 环境</text>
+
+    <rect x="390" y="892" width="200" height="44" rx="8" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+    <text x="490" y="919" text-anchor="middle" font-size="13" font-weight="600" fill="#713f12">Control 控制插件</text>
+
+    <rect x="610" y="892" width="200" height="44" rx="8" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+    <text x="710" y="919" text-anchor="middle" font-size="13" font-weight="600" fill="#713f12">Config Change</text>
+
+    <rect x="830" y="892" width="200" height="44" rx="8" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+    <text x="930" y="919" text-anchor="middle" font-size="13" font-weight="600" fill="#713f12">AI Pipeline</text>
+
+    <rect x="1050" y="892" width="200" height="44" rx="8" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+    <text x="1150" y="919" text-anchor="middle" font-size="13" font-weight="600" fill="#713f12">AI Storage / Importer</text>
+  </g>
+
+  <!-- arrow L7 -> L8 -->
+  <line x1="720" y1="946" x2="720" y2="970" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Layer 8 : Persistence -->
+  <rect x="60" y="974" width="1320" height="86" rx="10" fill="#ffffff" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="60" y="974" width="6" height="86" rx="3" fill="#14b8a6"/>
+  <text x="80" y="997" font-size="13" font-weight="700" fill="#134e4a">持久化层</text>
+  <text x="80" y="1014" font-size="11" fill="#6b7280">Persistence</text>
+
+  <g filter="url(#shadow)">
+    <rect x="320" y="992" width="240" height="56" rx="8" fill="#f0fdfa" stroke="#14b8a6" stroke-width="1.5"/>
+    <text x="440" y="1016" text-anchor="middle" font-size="14" font-weight="700" fill="#134e4a">Derby（内嵌）</text>
+    <text x="440" y="1034" text-anchor="middle" font-size="11" fill="#0e6b62">开箱即用 · 默认</text>
+
+    <rect x="600" y="992" width="240" height="56" rx="8" fill="#f0fdfa" stroke="#14b8a6" stroke-width="1.5"/>
+    <text x="720" y="1016" text-anchor="middle" font-size="14" font-weight="700" fill="#134e4a">MySQL</text>
+    <text x="720" y="1034" text-anchor="middle" font-size="11" fill="#0e6b62">生产推荐 · 多数据源</text>
+
+    <rect x="880" y="992" width="240" height="56" rx="8" fill="#f0fdfa" stroke="#14b8a6" stroke-width="1.5"/>
+    <text x="1000" y="1016" text-anchor="middle" font-size="14" font-weight="700" fill="#134e4a">PostgreSQL</text>
+    <text x="1000" y="1034" text-anchor="middle" font-size="11" fill="#0e6b62">社区扩展方言</text>
+  </g>
+
+  <!-- arrow L8 -> L9 -->
+  <line x1="720" y1="1064" x2="720" y2="1086" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Layer 9 : Integration -->
+  <rect x="60" y="1090" width="1320" height="86" rx="10" fill="#ffffff" stroke="#dbe3ee" stroke-width="1"/>
+  <rect x="60" y="1090" width="6" height="86" rx="3" fill="#0284c7"/>
+  <text x="80" y="1113" font-size="13" font-weight="700" fill="#0c4a6e">生态集成</text>
+  <text x="80" y="1130" font-size="11" fill="#6b7280">Integration</text>
+
+  <g filter="url(#shadow)">
+    <rect x="200" y="1108" width="220" height="56" rx="8" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.5"/>
+    <text x="310" y="1132" text-anchor="middle" font-size="14" font-weight="700" fill="#0c4a6e">Istio</text>
+    <text x="310" y="1150" text-anchor="middle" font-size="11" fill="#1e6a9a">MCP / 服务网格对接</text>
+
+    <rect x="460" y="1108" width="220" height="56" rx="8" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.5"/>
+    <text x="570" y="1132" text-anchor="middle" font-size="14" font-weight="700" fill="#0c4a6e">K8s Sync</text>
+    <text x="570" y="1150" text-anchor="middle" font-size="11" fill="#1e6a9a">Kubernetes 服务同步</text>
+
+    <rect x="720" y="1108" width="220" height="56" rx="8" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.5"/>
+    <text x="830" y="1132" text-anchor="middle" font-size="14" font-weight="700" fill="#0c4a6e">Prometheus</text>
+    <text x="830" y="1150" text-anchor="middle" font-size="11" fill="#1e6a9a">指标暴露 / 监控</text>
+
+    <rect x="980" y="1108" width="220" height="56" rx="8" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.5"/>
+    <text x="1090" y="1132" text-anchor="middle" font-size="14" font-weight="700" fill="#0c4a6e">CMDB</text>
+    <text x="1090" y="1150" text-anchor="middle" font-size="11" fill="#1e6a9a">标签 / 元数据来源</text>
+  </g>
+
+  <!-- ============================ Legend ============================ -->
+  <g transform="translate(60,1186)">
+    <text x="0" y="14" font-size="11" fill="#6b7280">说明：箭头方向自上而下表示请求 / 数据流向；左侧色条标识分层；插件层通过 SPI 横向贯穿各业务模块。</text>
+  </g>
+</svg>
