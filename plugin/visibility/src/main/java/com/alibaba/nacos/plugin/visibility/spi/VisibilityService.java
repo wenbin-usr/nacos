@@ -38,7 +38,8 @@ public interface VisibilityService extends PluginConfigSpec {
      * configurable items; those services are initialized through unified plugin configuration.</p>
      *
      * @param properties service-specific properties
-     * @deprecated declare configuration definitions and use the unified configuration lifecycle instead
+     * @deprecated declare configuration definitions and use the unified configuration lifecycle
+     *     instead. Planned for removal in Nacos 4.0.0.
      */
     @Deprecated
     default void init(Properties properties) {
@@ -51,7 +52,7 @@ public interface VisibilityService extends PluginConfigSpec {
      *
      * @param identity     current identity
      * @param apiType      current api type
-     * @param resourceType resource type, such as skill / agentspec
+     * @param resourceType domain-specific resource type
      * @return default scope for new resource
      */
     default String resolveDefaultScopeForCreate(String identity, String apiType,

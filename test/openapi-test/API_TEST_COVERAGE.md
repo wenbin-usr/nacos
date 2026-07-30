@@ -51,15 +51,17 @@ rows. Effective coverage counts `Covered` rows as `1.0` and `Partial` rows as
 
 | API surface | Scenario rows | Covered | Partial | Pending | Strict coverage | Effective coverage |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Client OpenAPI | 8 | 8 | 0 | 0 | 100.00% | 100.00% |
-| Admin API | 35 | 30 | 5 | 0 | 85.71% | 92.86% |
-| Console API | 27 | 25 | 2 | 0 | 92.59% | 96.30% |
-| Total | 70 | 63 | 7 | 0 | 90.00% | 95.00% |
+| Client OpenAPI | 10 | 10 | 0 | 0 | 100.00% | 100.00% |
+| Admin API | 38 | 31 | 7 | 0 | 81.58% | 90.79% |
+| Console API | 28 | 25 | 3 | 0 | 88.89% | 94.44% |
+| Auth API | 4 | 0 | 1 | 3 | 0.00% | 12.50% |
+| Total | 80 | 66 | 11 | 3 | 82.50% | 89.38% |
 
 Partial rows are documented in the matching scenario document. The current
 partial set is limited to operations whose remaining success paths mutate
-shared runtime/storage state, require publish-pipeline plugin data, or require
-an external LLM provider.
+shared runtime/storage state, require publish-pipeline plugin data, require a
+data-plane publisher binding not yet present in standalone IT, or require an
+external LLM provider.
 
 External protocol adaptors are tracked separately from the Nacos API coverage
 totals because they run in independent web contexts. The ARD adaptor currently
@@ -95,8 +97,47 @@ missing OpenAPI IT coverage.
 
 Skill upload precheck response-shape coverage is maintained by the admin and
 console Skill upload scenario rows, including `maxPublishedVersion` and
-`targetVersion`. Contract-only field changes do not alter the scenario-row
-totals above.
+`targetVersion`. Precheck requests carry only the archive and namespace. Those
+rows verify that precheck predicts a version from archive sources and server
+state, while upload can select a later available request `targetVersion` before
+server-side version generation. They also cover the batch upload compatibility
+fields `succeeded` and `failed`, plus per-item `success`, `errorCode`, and
+`errorMessage` in `results`. Contract-only field changes do not alter the
+scenario-row totals above.
+
+Agent Admin definition creation is counted in the existing Agent Admin and
+Version scenario rows. The unified `POST /v3/admin/ai/agents/draft` operation
+creates missing Agent metadata together with the first draft; the removed root
+`POST /v3/admin/ai/agents` operation is no longer a coverage surface. This
+contract consolidation does not change the scenario-row totals. POST retry and
+conflict scenarios prove that creation does not replace current draft content;
+replacement remains the distinct `PUT /v3/admin/ai/agents/draft` operation.
+
+Agent Console management is tracked as one additional covered Console scenario
+row. It mirrors the Agent Admin relative paths and form contracts, while
+`GET /v3/console/ai/agents/runtime-endpoints` adds only the Console-specific
+Naming service reference wrapper. Agent lifecycle and persistence semantics
+remain covered by the existing Admin rows rather than being redefined by the
+Console facade. The Client Endpoint scenario cross-validates an Admin-created
+and published Agent through Console Overview, then verifies that Client
+registration and deregistration produce matching populated and empty Runtime
+snapshots through both Admin and Console.
+
+The legacy MCP Console import validation and execute endpoints remain covered
+by `McpConsoleApiOpenApiITCase` through Nacos 3.3.x.
+They are deprecated and planned for removal in Nacos 3.4.0; the managed
+`/v3/console/ai/import/*` flow is covered separately by
+`AiResourceImportConsoleApiOpenApiITCase`.
+
+RAD Agent Client coverage is split into two rows. Search/Discover validates the
+online catalog and discovery projection, while Endpoint publication validates
+the Form-based independent HTTP Publisher lifecycle, required headers, idempotency, and
+the `HTTP_CLIENT_NOT_FOUND (50404)` recovery signal. The Endpoint row also
+cross-validates the published definition and Runtime state through Admin,
+Client, and Console reads. Querying with a Client id is explicitly covered as
+not creating an empty Client or Publisher. The Client-only renewal and
+Publisher-renewal separation is covered by the corresponding lifecycle unit
+tests.
 
 ## Coverage Documents
 
@@ -105,4 +146,5 @@ totals above.
 | Client OpenAPI | [CLIENT_API_TEST_SCENARIOS.md](CLIENT_API_TEST_SCENARIOS.md) | `src/test/java/com/alibaba/nacos/test/openapi/client` |
 | Admin API | [ADMIN_API_TEST_SCENARIOS.md](ADMIN_API_TEST_SCENARIOS.md) | `src/test/java/com/alibaba/nacos/test/adminapi` |
 | Console API | [CONSOLE_API_TEST_SCENARIOS.md](CONSOLE_API_TEST_SCENARIOS.md) | `src/test/java/com/alibaba/nacos/test/consoleapi` |
+| Auth API | [AUTH_API_TEST_SCENARIOS.md](AUTH_API_TEST_SCENARIOS.md) | `src/test/java/com/alibaba/nacos/test/adminapi/auth` |
 | AI Registry Adaptor | [AI_REGISTRY_ADAPTOR_API_TEST_SCENARIOS.md](AI_REGISTRY_ADAPTOR_API_TEST_SCENARIOS.md) | `ai-registry-adaptor/src/test/java/com/alibaba/nacos/airegistry` |

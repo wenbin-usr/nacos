@@ -30,6 +30,7 @@ import com.alibaba.nacos.ai.service.agent.storage.AgentVersionStorageService;
 import com.alibaba.nacos.ai.service.agent.storage.PreparedAgentVersionWrite;
 import com.alibaba.nacos.ai.service.repository.AiResourcePersistService;
 import com.alibaba.nacos.ai.service.repository.AiResourceVersionPersistService;
+import com.alibaba.nacos.ai.service.repository.QueryCondition;
 import com.alibaba.nacos.ai.service.resource.AiResourceManager;
 import com.alibaba.nacos.ai.service.resource.ResourceVersionInfo;
 import com.alibaba.nacos.api.ai.constant.AiConstants;
@@ -37,8 +38,10 @@ import com.alibaba.nacos.api.ai.model.agent.Agent;
 import com.alibaba.nacos.api.ai.model.agent.AgentCallInterface;
 import com.alibaba.nacos.api.ai.model.agent.AgentOverview;
 import com.alibaba.nacos.api.ai.model.agent.AgentProvider;
+import com.alibaba.nacos.api.ai.model.agent.AgentSummary;
 import com.alibaba.nacos.api.ai.model.agent.AgentVersionCatalog;
 import com.alibaba.nacos.api.ai.model.agent.AgentVersionDetail;
+import com.alibaba.nacos.api.ai.model.agent.AgentVersionInfo;
 import com.alibaba.nacos.api.ai.model.agent.AgentVersionSummary;
 import com.alibaba.nacos.api.ai.model.agent.EndpointSource;
 import com.alibaba.nacos.api.exception.NacosException;
@@ -164,12 +167,11 @@ class AgentPersistenceServiceTest {
             return RESOURCE_ID;
         });
         
-        AgentOverview result = service.create(agent, initialDraft);
+        AgentVersionDetail result = service.createInitialDraft(agent, initialDraft);
         
-        assertCreatedOverview(result);
+        assertCreatedDetail(result);
         assertPersistedResource(persistedResource.get());
         assertPersistedVersion(persistedVersion.get());
-        verify(storageService, never()).load(any(AgentVersionStorageDescriptor.class));
         InOrder order = inOrder(storageService, resourcePersistService, versionPersistService);
         order.verify(storageService).prepare(eq(NAMESPACE_ID), eq(AGENT_NAME), eq(VERSION),
             any(AgentVersionContent.class));
@@ -184,36 +186,44 @@ class AgentPersistenceServiceTest {
             Constants.Agent.RESOURCE_TYPE_AGENT);
         order.verify(versionPersistService).find(NAMESPACE_ID, AGENT_NAME,
             Constants.Agent.RESOURCE_TYPE_AGENT, VERSION);
+        order.verify(storageService).load(any(AgentVersionStorageDescriptor.class));
     }
     
     @Test
     void testCreateRejectsReadOnlyAndMismatchedInputsBeforePersistence() {
         agent.setMetaVersion(1L);
-        assertThrows(IllegalArgumentException.class, () -> service.create(agent, initialDraft));
+        assertThrows(IllegalArgumentException.class,
+            () -> service.createInitialDraft(agent, initialDraft));
         
         agent.setMetaVersion(null);
         initialDraft.setNamespaceId("other");
-        assertThrows(IllegalArgumentException.class, () -> service.create(agent, initialDraft));
+        assertThrows(IllegalArgumentException.class,
+            () -> service.createInitialDraft(agent, initialDraft));
         
         initialDraft.setNamespaceId(null);
         initialDraft.setAgentName("other");
-        assertThrows(IllegalArgumentException.class, () -> service.create(agent, initialDraft));
+        assertThrows(IllegalArgumentException.class,
+            () -> service.createInitialDraft(agent, initialDraft));
         
         initialDraft.setAgentName(null);
         initialDraft.setStatus(AiConstants.Agent.VERSION_STATUS_ONLINE);
-        assertThrows(IllegalArgumentException.class, () -> service.create(agent, initialDraft));
+        assertThrows(IllegalArgumentException.class,
+            () -> service.createInitialDraft(agent, initialDraft));
         
         initialDraft.setStatus(null);
         initialDraft.setContentDigest(prepared.getDescriptor().getContentDigest());
-        assertThrows(IllegalArgumentException.class, () -> service.create(agent, initialDraft));
+        assertThrows(IllegalArgumentException.class,
+            () -> service.createInitialDraft(agent, initialDraft));
         
         verifyNoInteractions(resourcePersistService, versionPersistService, storageService);
     }
     
     @Test
     void testCreateRejectsNullInputsBeforePersistence() {
-        assertThrows(IllegalArgumentException.class, () -> service.create(null, initialDraft));
-        assertThrows(IllegalArgumentException.class, () -> service.create(agent, null));
+        assertThrows(IllegalArgumentException.class,
+            () -> service.createInitialDraft(null, initialDraft));
+        assertThrows(IllegalArgumentException.class,
+            () -> service.createInitialDraft(agent, null));
         
         verifyNoInteractions(resourcePersistService, versionPersistService, storageService);
     }
@@ -228,7 +238,7 @@ class AgentPersistenceServiceTest {
         stubPrepare();
         
         IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertTrue(exception.getMessage().contains("persisted characters"));
         verifyNoInteractions(resourcePersistService, versionPersistService);
@@ -250,9 +260,10 @@ class AgentPersistenceServiceTest {
         when(versionPersistService.find(NAMESPACE_ID, AGENT_NAME,
             Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenReturn(storedVersion());
         
-        AgentOverview result = service.create(agent, initialDraft);
+        AgentVersionDetail result = service.createInitialDraft(agent, initialDraft);
         
-        assertEquals(tags, result.getAgent().getTags());
+        assertNotNull(result);
+        assertEquals(tags, service.getAgent(NAMESPACE_ID, AGENT_NAME).getTags());
     }
     
     @Test
@@ -266,9 +277,10 @@ class AgentPersistenceServiceTest {
         when(versionPersistService.find(NAMESPACE_ID, AGENT_NAME,
             Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenReturn(storedVersion());
         
-        AgentOverview result = service.create(agent, initialDraft);
+        AgentVersionDetail result = service.createInitialDraft(agent, initialDraft);
         
-        assertTrue(result.getAgent().getTags().isEmpty());
+        assertNotNull(result);
+        assertTrue(service.getAgent(NAMESPACE_ID, AGENT_NAME).getTags().isEmpty());
     }
     
     @Test
@@ -280,7 +292,7 @@ class AgentPersistenceServiceTest {
             Constants.Agent.RESOURCE_TYPE_AGENT)).thenReturn(conflictingResource);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertConflict(exception);
         verify(versionPersistService, never()).insert(any(AiResourceVersion.class));
@@ -299,7 +311,7 @@ class AgentPersistenceServiceTest {
             Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenReturn(conflictingVersion);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertConflict(exception);
         verify(versionPersistService, never()).insert(any(AiResourceVersion.class));
@@ -318,7 +330,7 @@ class AgentPersistenceServiceTest {
         
         for (int i = 0; i < conflictingResources.size(); i++) {
             assertConflict(assertThrows(NacosApiException.class,
-                () -> service.create(agent, initialDraft)));
+                () -> service.createInitialDraft(agent, initialDraft)));
         }
         
         assertEquals(conflictingResources.size(), index.get());
@@ -340,7 +352,7 @@ class AgentPersistenceServiceTest {
         
         for (int i = 0; i < conflictingVersions.size(); i++) {
             assertConflict(assertThrows(NacosApiException.class,
-                () -> service.create(agent, initialDraft)));
+                () -> service.createInitialDraft(agent, initialDraft)));
         }
         
         assertEquals(conflictingVersions.size(), index.get());
@@ -360,7 +372,7 @@ class AgentPersistenceServiceTest {
             .thenThrow(new DuplicateKeyException("duplicate"));
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertConflict(exception);
         verify(storageService, never()).save(any(PreparedAgentVersionWrite.class));
@@ -384,9 +396,9 @@ class AgentPersistenceServiceTest {
             return RESOURCE_ID;
         });
         
-        AgentOverview result = service.create(agent, initialDraft);
+        AgentVersionDetail result = service.createInitialDraft(agent, initialDraft);
         
-        assertCreatedOverview(result);
+        assertCreatedDetail(result);
         verify(storageService).save(prepared);
     }
     
@@ -401,7 +413,7 @@ class AgentPersistenceServiceTest {
             .thenThrow(new IllegalStateException("unknown insert outcome"));
         
         NacosException exception = assertThrows(NacosException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertEquals(NacosException.SERVER_ERROR, exception.getErrCode());
         verify(storageService, never()).save(any(PreparedAgentVersionWrite.class));
@@ -418,7 +430,7 @@ class AgentPersistenceServiceTest {
         when(versionPersistService.insert(any(AiResourceVersion.class))).thenReturn(0L);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertServerError(exception);
         verify(storageService, never()).save(any(PreparedAgentVersionWrite.class));
@@ -438,7 +450,7 @@ class AgentPersistenceServiceTest {
         when(versionPersistService.insert(any(AiResourceVersion.class))).thenThrow(insertFailure);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertConflict(exception);
         assertSame(insertFailure, exception.getCause());
@@ -460,7 +472,7 @@ class AgentPersistenceServiceTest {
         when(versionPersistService.insert(any(AiResourceVersion.class))).thenThrow(insertFailure);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertServerError(exception);
         assertSame(insertFailure, exception.getCause());
@@ -476,7 +488,7 @@ class AgentPersistenceServiceTest {
         doThrow(storageFailure).when(storageService).save(prepared);
         
         NacosException result = assertThrows(NacosException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertSame(storageFailure, result);
         verify(storageService).save(prepared);
@@ -496,7 +508,7 @@ class AgentPersistenceServiceTest {
         doThrow(storageFailure).when(storageService).save(prepared);
         
         NacosException result = assertThrows(NacosException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertSame(storageFailure, result);
         verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
@@ -513,9 +525,9 @@ class AgentPersistenceServiceTest {
         when(versionPersistService.find(NAMESPACE_ID, AGENT_NAME,
             Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenReturn(storedVersion());
         
-        AgentOverview result = service.create(agent, initialDraft);
+        AgentVersionDetail result = service.createInitialDraft(agent, initialDraft);
         
-        assertCreatedOverview(result);
+        assertCreatedDetail(result);
         verify(versionPersistService, never()).insert(any(AiResourceVersion.class));
         verify(resourcePersistService, never()).insert(any(AiResource.class));
         verify(storageService).save(prepared);
@@ -549,9 +561,9 @@ class AgentPersistenceServiceTest {
         when(versionPersistService.find(NAMESPACE_ID, AGENT_NAME,
             Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenReturn(storedVersion());
         
-        AgentOverview result = service.create(agent, initialDraft);
+        AgentVersionDetail result = service.createInitialDraft(agent, initialDraft);
         
-        assertCreatedOverview(result);
+        assertCreatedDetail(result);
         verify(versionPersistService, never()).insert(any(AiResourceVersion.class));
         verify(resourcePersistService, never()).insert(any(AiResource.class));
     }
@@ -570,9 +582,9 @@ class AgentPersistenceServiceTest {
             return RESOURCE_ID;
         });
         
-        AgentOverview result = service.create(agent, initialDraft);
+        AgentVersionDetail result = service.createInitialDraft(agent, initialDraft);
         
-        assertCreatedOverview(result);
+        assertCreatedDetail(result);
         verify(versionPersistService, never()).insert(any(AiResourceVersion.class));
         verify(storageService).save(prepared);
         verify(resourcePersistService).insert(any(AiResource.class));
@@ -595,9 +607,9 @@ class AgentPersistenceServiceTest {
             return RESOURCE_ID;
         });
         
-        AgentOverview result = service.create(agent, initialDraft);
+        AgentVersionDetail result = service.createInitialDraft(agent, initialDraft);
         
-        assertCreatedOverview(result);
+        assertCreatedDetail(result);
         verify(storageService).save(prepared);
     }
     
@@ -615,7 +627,7 @@ class AgentPersistenceServiceTest {
         when(resourcePersistService.insert(any(AiResource.class)))
             .thenThrow(new DuplicateKeyException("duplicate"));
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertConflict(exception);
         verify(resourcePersistService).insert(any(AiResource.class));
@@ -636,7 +648,7 @@ class AgentPersistenceServiceTest {
         when(resourcePersistService.insert(any(AiResource.class)))
             .thenThrow(new DuplicateKeyException("duplicate"));
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertConflict(exception);
         verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
@@ -658,7 +670,7 @@ class AgentPersistenceServiceTest {
         when(resourcePersistService.insert(any(AiResource.class)))
             .thenThrow(new DuplicateKeyException("duplicate"));
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertConflict(exception);
         verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
@@ -677,9 +689,9 @@ class AgentPersistenceServiceTest {
         when(resourcePersistService.insert(any(AiResource.class)))
             .thenThrow(new DuplicateKeyException("duplicate"));
         
-        AgentOverview result = service.create(agent, initialDraft);
+        AgentVersionDetail result = service.createInitialDraft(agent, initialDraft);
         
-        assertCreatedOverview(result);
+        assertCreatedDetail(result);
         verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
     }
     
@@ -696,9 +708,9 @@ class AgentPersistenceServiceTest {
         when(resourcePersistService.insert(any(AiResource.class)))
             .thenThrow(new IllegalStateException("unknown insert outcome"));
         
-        AgentOverview result = service.create(agent, initialDraft);
+        AgentVersionDetail result = service.createInitialDraft(agent, initialDraft);
         
-        assertCreatedOverview(result);
+        assertCreatedDetail(result);
         verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
     }
     
@@ -714,7 +726,7 @@ class AgentPersistenceServiceTest {
             .thenThrow(new IllegalStateException("unknown insert outcome"));
         
         NacosException exception = assertThrows(NacosException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertEquals(NacosException.SERVER_ERROR, exception.getErrCode());
         verify(storageService).save(prepared);
@@ -734,7 +746,7 @@ class AgentPersistenceServiceTest {
             .thenThrow(new DuplicateKeyException("duplicate"));
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertConflict(exception);
         verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
@@ -746,7 +758,7 @@ class AgentPersistenceServiceTest {
         when(resourcePersistService.insert(any(AiResource.class))).thenReturn(0L);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertServerError(exception);
         verify(storageService).save(prepared);
@@ -766,7 +778,7 @@ class AgentPersistenceServiceTest {
         when(resourcePersistService.insert(any(AiResource.class))).thenThrow(insertFailure);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertConflict(exception);
         assertSame(insertFailure, exception.getCause());
@@ -789,7 +801,7 @@ class AgentPersistenceServiceTest {
         when(resourcePersistService.insert(any(AiResource.class))).thenThrow(insertFailure);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertServerError(exception);
         assertSame(insertFailure, exception.getCause());
@@ -808,7 +820,7 @@ class AgentPersistenceServiceTest {
         when(resourcePersistService.insert(any(AiResource.class))).thenReturn(RESOURCE_ID);
         
         NacosException exception = assertThrows(NacosException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertEquals(NacosException.SERVER_ERROR, exception.getErrCode());
         verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
@@ -819,7 +831,7 @@ class AgentPersistenceServiceTest {
         stubSuccessfulWritesForPostCommit(storedResource(), null);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertServerError(exception);
         verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
@@ -832,7 +844,7 @@ class AgentPersistenceServiceTest {
         stubSuccessfulWritesForPostCommit(storedResource(), invalidVersion);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertServerError(exception);
         verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
@@ -847,7 +859,7 @@ class AgentPersistenceServiceTest {
             Constants.Agent.RESOURCE_TYPE_AGENT)).thenThrow(persistenceFailure);
         
         NacosApiException exception = assertThrows(NacosApiException.class,
-            () -> service.create(agent, initialDraft));
+            () -> service.createInitialDraft(agent, initialDraft));
         
         assertServerError(exception);
         assertSame(persistenceFailure, exception.getCause());
@@ -1117,6 +1129,201 @@ class AgentPersistenceServiceTest {
         
         assertTrue(service.getAgent(NAMESPACE_ID, AGENT_NAME).getTags().isEmpty());
         assertTrue(service.getAgent(NAMESPACE_ID, AGENT_NAME).getTags().isEmpty());
+    }
+    
+    @Test
+    void testGetAgentOverviewUsesBoundedVersionSummaryPage() throws NacosException {
+        Page<AiResourceVersion> versions =
+            versionPage(Collections.singletonList(storedVersion()), 1, 1);
+        when(resourcePersistService.find(NAMESPACE_ID, AGENT_NAME,
+            Constants.Agent.RESOURCE_TYPE_AGENT)).thenReturn(storedResource());
+        when(versionPersistService.list(NAMESPACE_ID, AGENT_NAME,
+            Constants.Agent.RESOURCE_TYPE_AGENT, null, 1, 8)).thenReturn(versions);
+        
+        AgentOverview result = service.getAgentOverview(NAMESPACE_ID, AGENT_NAME, 8);
+        
+        assertEquals(AGENT_NAME, result.getAgent().getAgentName());
+        assertEquals(1, result.getVersionPage().getTotalCount());
+        assertEquals(VERSION, result.getVersionPage().getPageItems().get(0).getVersion());
+        verify(resourcePersistService, times(2)).find(NAMESPACE_ID, AGENT_NAME,
+            Constants.Agent.RESOURCE_TYPE_AGENT);
+        verifyNoInteractions(storageService);
+    }
+    
+    @Test
+    void testTryUpdateAgentUsesAuthorizedRowAndMergesLatestVersionFacts()
+        throws NacosException {
+        Agent replacement = newAgent();
+        replacement.setDisplayName("Updated Agent");
+        replacement.setDescription("Updated description");
+        replacement.setTags(Collections.singletonList("updated"));
+        replacement.setOwner("bob");
+        replacement.setScope("PUBLIC");
+        AiResource concurrentRow = storedResource();
+        ResourceVersionInfo concurrentVersionInfo = JacksonUtils.toObj(
+            concurrentRow.getVersionInfo(), ResourceVersionInfo.class);
+        concurrentVersionInfo.setEditingVersion("1.2.0");
+        concurrentVersionInfo.setOnlineCnt(1);
+        concurrentVersionInfo.setLabels(
+            Collections.singletonMap(AiResourceConstants.LABEL_LATEST, "1.1.0"));
+        concurrentRow.setVersionInfo(JacksonUtils.toJson(concurrentVersionInfo));
+        concurrentRow.setMetaVersion(4L);
+        AgentResourceExt concurrentExt =
+            AgentResourceExtSerializer.deserialize(concurrentRow.getExt());
+        concurrentExt.setVersionCatalog(AgentVersionCatalogBuilder.build(
+            Collections.singletonMap("1.1.0", Collections.singletonList("a2a")),
+            Collections.singletonMap(AiResourceConstants.LABEL_LATEST, "1.1.0"))
+            .getVersionCatalog());
+        concurrentRow.setExt(AgentResourceExtSerializer.serialize(concurrentExt));
+        AiResource updatedRow = storedResource();
+        updatedRow.setDesc(replacement.getDescription());
+        updatedRow.setBizTags(JacksonUtils.toJson(replacement.getTags()));
+        updatedRow.setOwner(concurrentRow.getOwner());
+        updatedRow.setScope(concurrentRow.getScope());
+        updatedRow.setVersionInfo(concurrentRow.getVersionInfo());
+        updatedRow.setMetaVersion(5L);
+        AgentResourceExt updatedExt =
+            AgentResourceExtSerializer.deserialize(concurrentRow.getExt());
+        updatedExt.setDisplayName(replacement.getDisplayName());
+        updatedRow.setExt(AgentResourceExtSerializer.serialize(updatedExt));
+        when(resourcePersistService.find(NAMESPACE_ID, AGENT_NAME,
+            Constants.Agent.RESOURCE_TYPE_AGENT)).thenReturn(updatedRow);
+        when(resourcePersistService.updateMetaCas(eq(NAMESPACE_ID), eq(AGENT_NAME),
+            eq(Constants.Agent.RESOURCE_TYPE_AGENT), eq(4L),
+            any(AiResource.class))).thenReturn(true);
+        
+        Agent result = service.tryUpdateAgent(replacement, concurrentRow);
+        
+        assertEquals("Updated Agent", result.getDisplayName());
+        assertEquals("Updated description", result.getDescription());
+        assertEquals(Collections.singletonList("updated"), result.getTags());
+        assertEquals("1.2.0", result.getVersionInfo().getEditingVersion());
+        assertEquals("1.1.0", result.getVersionCatalog().getLatestVersion());
+        assertEquals(5L, result.getMetaVersion());
+        ArgumentCaptor<AiResource> updateCaptor = ArgumentCaptor.forClass(AiResource.class);
+        verify(resourcePersistService).updateMetaCas(eq(NAMESPACE_ID),
+            eq(AGENT_NAME), eq(Constants.Agent.RESOURCE_TYPE_AGENT), eq(4L),
+            updateCaptor.capture());
+        AiResource update = updateCaptor.getValue();
+        assertEquals("1.2.0", JacksonUtils.toObj(update.getVersionInfo(),
+            ResourceVersionInfo.class).getEditingVersion());
+        assertEquals("1.1.0", AgentResourceExtSerializer.deserialize(
+            update.getExt()).getVersionCatalog().getLatestVersion());
+        assertEquals("Updated description", update.getDesc());
+        assertEquals(concurrentRow.getOwner(), update.getOwner());
+        assertEquals(concurrentRow.getScope(), update.getScope());
+        assertEquals(concurrentRow.getOwner(), result.getOwner());
+        assertEquals(concurrentRow.getScope(), result.getScope());
+    }
+    
+    @Test
+    void testTryUpdateAgentReturnsNullWhenCasDoesNotMatch() throws NacosException {
+        Agent replacement = newAgent();
+        AiResource current = storedResource();
+        when(resourcePersistService.updateMetaCas(eq(NAMESPACE_ID), eq(AGENT_NAME),
+            eq(Constants.Agent.RESOURCE_TYPE_AGENT), eq(3L),
+            any(AiResource.class))).thenReturn(false);
+        
+        assertNull(service.tryUpdateAgent(replacement, current));
+        
+        verify(resourcePersistService, never()).find(anyString(), anyString(), anyString());
+    }
+    
+    @Test
+    void testTryUpdateAgentRejectsNullMismatchAndCorruptCurrentRow() {
+        AiResource current = storedResource();
+        assertThrows(IllegalArgumentException.class,
+            () -> service.tryUpdateAgent(null, current));
+        
+        Agent replacement = newAgent();
+        AiResource mismatch = storedResource();
+        mismatch.setName("Other Agent");
+        NacosApiException notFound = assertThrows(NacosApiException.class,
+            () -> service.tryUpdateAgent(replacement, mismatch));
+        assertEquals(ErrorCode.RESOURCE_NOT_FOUND.getCode(), notFound.getDetailErrCode());
+        
+        AiResource corrupt = storedResource();
+        corrupt.setStatus("invalid");
+        NacosApiException serverError = assertThrows(NacosApiException.class,
+            () -> service.tryUpdateAgent(replacement, corrupt));
+        assertEquals(ErrorCode.SERVER_ERROR.getCode(), serverError.getDetailErrCode());
+        
+        verifyNoInteractions(resourcePersistService);
+    }
+    
+    @Test
+    void testTryUpdateAgentRejectsEveryReadOnlyProjectionField() {
+        AiResource current = storedResource();
+        Agent replacement = newAgent();
+        
+        replacement.setVersionInfo(new AgentVersionInfo());
+        assertThrows(IllegalArgumentException.class,
+            () -> service.tryUpdateAgent(replacement, current));
+        replacement.setVersionInfo(null);
+        replacement.setVersionCatalog(new AgentVersionCatalog());
+        assertThrows(IllegalArgumentException.class,
+            () -> service.tryUpdateAgent(replacement, current));
+        replacement.setVersionCatalog(null);
+        replacement.setMetaVersion(1L);
+        assertThrows(IllegalArgumentException.class,
+            () -> service.tryUpdateAgent(replacement, current));
+        replacement.setMetaVersion(null);
+        replacement.setCreateTime(1L);
+        assertThrows(IllegalArgumentException.class,
+            () -> service.tryUpdateAgent(replacement, current));
+        replacement.setCreateTime(null);
+        replacement.setUpdateTime(1L);
+        assertThrows(IllegalArgumentException.class,
+            () -> service.tryUpdateAgent(replacement, current));
+        
+        verifyNoInteractions(resourcePersistService);
+    }
+    
+    @Test
+    void testListAgentsMapsSummariesAndRetainsPageMetadata() throws NacosException {
+        QueryCondition condition = new QueryCondition();
+        condition.setNamespaceId(NAMESPACE_ID);
+        Page<AiResource> source = new Page<AiResource>();
+        source.setPageNumber(2);
+        source.setTotalCount(21);
+        source.setPagesAvailable(3);
+        source.setPageItems(Collections.singletonList(storedResource()));
+        when(resourcePersistService.list(condition, 2, 10)).thenReturn(source);
+        
+        Page<AgentSummary> result = service.listAgents(condition, 2, 10);
+        
+        assertEquals(2, result.getPageNumber());
+        assertEquals(21, result.getTotalCount());
+        assertEquals(3, result.getPagesAvailable());
+        assertEquals(AGENT_NAME, result.getPageItems().get(0).getAgentName());
+        assertEquals(VERSION,
+            result.getPageItems().get(0).getVersionInfo().getEditingVersion());
+        verifyNoInteractions(versionPersistService, storageService);
+    }
+    
+    @Test
+    void testListAgentsHandlesNullPagesAndRejectsInvalidStoredSummary()
+        throws NacosException {
+        QueryCondition condition = new QueryCondition();
+        Page<AiResource> emptySource = new Page<AiResource>();
+        emptySource.setPageItems(null);
+        AiResource invalid = storedResource();
+        invalid.setStatus("invalid");
+        Page<AiResource> invalidSource = new Page<AiResource>();
+        invalidSource.setPageItems(Collections.singletonList(invalid));
+        when(resourcePersistService.list(condition, 1, 10)).thenReturn(null, emptySource,
+            invalidSource);
+        
+        Page<AgentSummary> nullPage = service.listAgents(condition, 1, 10);
+        Page<AgentSummary> emptyPage = service.listAgents(condition, 1, 10);
+        NacosApiException exception = assertThrows(NacosApiException.class,
+            () -> service.listAgents(condition, 1, 10));
+        
+        assertEquals(0, nullPage.getTotalCount());
+        assertEquals(0, nullPage.getPagesAvailable());
+        assertTrue(nullPage.getPageItems().isEmpty());
+        assertTrue(emptyPage.getPageItems().isEmpty());
+        assertEquals(ErrorCode.SERVER_ERROR.getCode(), exception.getDetailErrCode());
     }
     
     @Test
@@ -1519,10 +1726,66 @@ class AgentPersistenceServiceTest {
     }
     
     @Test
-    void testDeleteDraftDoesNotDeleteStorageWhenVersionRowDeleteMisses()
+    void testDeleteDraftRestoresEditingPointerWhenVersionRowDeleteMisses()
+        throws NacosException {
+        AiResource clearedPointer = lifecycleResource(null, null,
+            Collections.<String, String>emptyMap(), 4L);
+        when(versionPersistService.find(NAMESPACE_ID, AGENT_NAME,
+            Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenReturn(storedVersion(),
+                storedVersion());
+        when(resourcePersistService.find(NAMESPACE_ID, AGENT_NAME,
+            Constants.Agent.RESOURCE_TYPE_AGENT)).thenReturn(storedResource(), clearedPointer);
+        when(resourcePersistService.updateMetaCas(eq(NAMESPACE_ID), eq(AGENT_NAME),
+            eq(Constants.Agent.RESOURCE_TYPE_AGENT), anyLong(), any(AiResource.class)))
+            .thenReturn(true);
+        when(versionPersistService.delete(NAMESPACE_ID, AGENT_NAME,
+            Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenReturn(0);
+        
+        NacosApiException exception = assertThrows(NacosApiException.class,
+            () -> service.deleteDraft(NAMESPACE_ID, AGENT_NAME, VERSION));
+        
+        assertServerError(exception);
+        verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
+        ArgumentCaptor<AiResource> updates = ArgumentCaptor.forClass(AiResource.class);
+        verify(resourcePersistService, times(2)).updateMetaCas(eq(NAMESPACE_ID), eq(AGENT_NAME),
+            eq(Constants.Agent.RESOURCE_TYPE_AGENT), anyLong(), updates.capture());
+        assertNull(JacksonUtils.toObj(updates.getAllValues().get(0).getVersionInfo(),
+            ResourceVersionInfo.class).getEditingVersion());
+        assertEquals(VERSION,
+            JacksonUtils.toObj(updates.getAllValues().get(1).getVersionInfo(),
+                ResourceVersionInfo.class).getEditingVersion());
+    }
+    
+    @Test
+    void testDeleteDraftSuppressesCompensationReadFailure() throws NacosException {
+        IllegalStateException deleteFailure = new IllegalStateException("delete failed");
+        IllegalStateException compensationFailure =
+            new IllegalStateException("compensation read failed");
+        when(versionPersistService.find(NAMESPACE_ID, AGENT_NAME,
+            Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenReturn(storedVersion())
+            .thenThrow(compensationFailure);
+        when(resourcePersistService.find(NAMESPACE_ID, AGENT_NAME,
+            Constants.Agent.RESOURCE_TYPE_AGENT)).thenReturn(storedResource());
+        when(resourcePersistService.updateMetaCas(eq(NAMESPACE_ID), eq(AGENT_NAME),
+            eq(Constants.Agent.RESOURCE_TYPE_AGENT), eq(3L), any(AiResource.class)))
+            .thenReturn(true);
+        when(versionPersistService.delete(NAMESPACE_ID, AGENT_NAME,
+            Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenThrow(deleteFailure);
+        
+        NacosApiException exception = assertThrows(NacosApiException.class,
+            () -> service.deleteDraft(NAMESPACE_ID, AGENT_NAME, VERSION));
+        
+        assertServerError(exception);
+        assertEquals(compensationFailure, deleteFailure.getSuppressed()[0]);
+        verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
+    }
+    
+    @Test
+    void testDeleteDraftDoesNotRestorePointerWhenVersionWasDeletedConcurrently()
         throws NacosException {
         when(versionPersistService.find(NAMESPACE_ID, AGENT_NAME,
-            Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenReturn(storedVersion());
+            Constants.Agent.RESOURCE_TYPE_AGENT, VERSION)).thenReturn(storedVersion(),
+                (AiResourceVersion) null);
         when(resourcePersistService.find(NAMESPACE_ID, AGENT_NAME,
             Constants.Agent.RESOURCE_TYPE_AGENT)).thenReturn(storedResource());
         when(resourcePersistService.updateMetaCas(eq(NAMESPACE_ID), eq(AGENT_NAME),
@@ -1535,6 +1798,8 @@ class AgentPersistenceServiceTest {
             () -> service.deleteDraft(NAMESPACE_ID, AGENT_NAME, VERSION));
         
         assertServerError(exception);
+        verify(resourcePersistService).updateMetaCas(eq(NAMESPACE_ID), eq(AGENT_NAME),
+            eq(Constants.Agent.RESOURCE_TYPE_AGENT), eq(3L), any(AiResource.class));
         verify(storageService, never()).delete(any(AgentVersionStorageDescriptor.class));
     }
     
@@ -2127,9 +2392,12 @@ class AgentPersistenceServiceTest {
             Constants.Agent.RESOURCE_TYPE_AGENT)).thenReturn(rows.size());
     }
     
-    private void stubPrepare() {
+    private void stubPrepare() throws NacosException {
         when(storageService.prepare(anyString(), anyString(), anyString(),
             any(AgentVersionContent.class))).thenReturn(prepared);
+        org.mockito.Mockito.lenient()
+            .when(storageService.load(any(AgentVersionStorageDescriptor.class)))
+            .thenReturn(content);
     }
     
     private void stubDraftUpdatePreparation(PreparedAgentVersionWrite replacementWrite) {
@@ -2157,7 +2425,7 @@ class AgentPersistenceServiceTest {
         return result;
     }
     
-    private void stubUntilVersionInsert() {
+    private void stubUntilVersionInsert() throws NacosException {
         stubPrepare();
         when(resourcePersistService.find(NAMESPACE_ID, AGENT_NAME,
             Constants.Agent.RESOURCE_TYPE_AGENT)).thenReturn(null);
@@ -2167,7 +2435,7 @@ class AgentPersistenceServiceTest {
     }
     
     private void stubSuccessfulWritesForPostCommit(AiResource resource,
-        AiResourceVersion version) {
+        AiResourceVersion version) throws NacosException {
         stubPrepare();
         when(resourcePersistService.find(NAMESPACE_ID, AGENT_NAME,
             Constants.Agent.RESOURCE_TYPE_AGENT)).thenReturn(null, resource);
@@ -2425,17 +2693,17 @@ class AgentPersistenceServiceTest {
         return result.toString();
     }
     
-    private void assertCreatedOverview(AgentOverview result) {
+    private void assertCreatedDetail(AgentVersionDetail result) {
         assertNotNull(result);
-        assertEquals(AGENT_NAME, result.getAgent().getAgentName());
-        assertEquals(VERSION, result.getAgent().getVersionInfo().getEditingVersion());
-        assertEquals(0, result.getAgent().getVersionCatalog().getOnlineVersions().size());
-        assertNull(result.getAgent().getVersionCatalog().getLatestVersion());
-        assertEquals(1, result.getVersionPage().getTotalCount());
-        assertEquals(1, result.getVersionPage().getPageItems().size());
-        assertEquals(VERSION, result.getVersionPage().getPageItems().get(0).getVersion());
+        assertEquals(NAMESPACE_ID, result.getNamespaceId());
+        assertEquals(AGENT_NAME, result.getAgentName());
+        assertEquals(VERSION, result.getVersion());
+        assertEquals(AiConstants.Agent.VERSION_STATUS_DRAFT, result.getStatus());
+        assertEquals(initialDraft.getCallInterfaces(), result.getCallInterfaces());
+        assertEquals(initialDraft.getAuthor(), result.getAuthor());
+        assertEquals(initialDraft.getChangeDescription(), result.getChangeDescription());
         assertEquals(prepared.getDescriptor().getContentDigest(),
-            result.getVersionPage().getPageItems().get(0).getContentDigest());
+            result.getContentDigest());
     }
     
     private void assertPersistedResource(AiResource resource) {
