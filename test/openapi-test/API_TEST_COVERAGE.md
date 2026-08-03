@@ -32,6 +32,10 @@ coverage before adding or debugging an IT.
   handling coverage when those scenario groups are practical.
 - If an exposed success path is intentionally not executed because it mutates
   risky runtime or storage state, record the reason in the scenario cell.
+- When a change only corrects authorization metadata without changing the HTTP
+  request or response contract, keep the functional scenario status unchanged,
+  record the affected surface in its scenario document, and verify the exact
+  `@Secured` tuple with a focused module test.
 
 ## Status Legend
 
@@ -131,6 +135,17 @@ Console facade. The Client Endpoint scenario cross-validates an Admin-created
 and published Agent through Console Overview, then verifies that Client
 registration and deregistration produce matching populated and empty Runtime
 snapshots through both Admin and Console.
+
+Legacy A2A Admin and Console operations are now compatibility facades over the
+same canonical Agent definition. The Admin A2A row covers both directions:
+legacy create/update/promote/delete observed through canonical Agent reads, and
+canonical draft/force-publish observed through legacy AgentCard reads. The
+Console A2A row verifies legacy Console create to canonical Console read,
+legacy Admin create to canonical Console read across ports, and canonical
+Console create to legacy Console and Admin reads. These scenarios deliberately
+do not read or write the removed parallel
+Config definition layout; legacy SERVICE Runtime lookup remains a separate
+exact-Version Naming concern.
 
 The legacy MCP Console import validation and execute endpoints remain covered
 by `McpConsoleApiOpenApiITCase` through Nacos 3.3.x.
