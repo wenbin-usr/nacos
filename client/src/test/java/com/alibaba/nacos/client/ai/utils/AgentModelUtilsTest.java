@@ -16,8 +16,13 @@
 
 package com.alibaba.nacos.client.ai.utils;
 
+import com.alibaba.nacos.api.ai.model.agent.AgentCallInterface;
+import com.alibaba.nacos.api.ai.model.agent.AgentPublishRequest;
 import com.alibaba.nacos.api.ai.model.agent.Endpoint;
 import com.alibaba.nacos.api.ai.model.agent.EndpointSource;
+import com.alibaba.nacos.api.ai.model.agent.RuntimeVersionBinding;
+import com.alibaba.nacos.api.ai.model.rad.AgentDiscoveryCallInterface;
+import com.alibaba.nacos.api.ai.model.rad.AgentDiscoveryEndpoint;
 import com.alibaba.nacos.api.ai.model.rad.AgentDiscoveryFilter;
 import com.alibaba.nacos.api.ai.model.rad.AgentDiscoveryRequest;
 import com.alibaba.nacos.api.ai.model.rad.AgentDiscoveryResult;
@@ -25,8 +30,12 @@ import com.alibaba.nacos.api.ai.model.rad.AgentEndpointDeregistrationBatch;
 import com.alibaba.nacos.api.ai.model.rad.AgentEndpointRegistrationBatch;
 import com.alibaba.nacos.api.ai.model.rad.AgentReference;
 import com.alibaba.nacos.api.ai.model.rad.AgentSearchRequest;
+import com.alibaba.nacos.api.ai.model.rad.EndpointSet;
 import com.alibaba.nacos.api.exception.NacosException;
+import com.alibaba.nacos.api.utils.json.JsonUtils;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
 import java.lang.reflect.Constructor;
 import java.util.ArrayList;
@@ -47,6 +56,43 @@ class AgentModelUtilsTest {
         Constructor<AgentModelUtils> constructor = AgentModelUtils.class.getDeclaredConstructor();
         constructor.setAccessible(true);
         constructor.newInstance();
+    }
+    
+    @Test
+    void copyPublishRequestDeepCopiesAndValidates() throws NacosException {
+        AgentPublishRequest source = new AgentPublishRequest();
+        source.setAgentName("agent-a");
+        source.setVersion("1.0.0");
+        source.setCallInterfaces(new ArrayList<AgentCallInterface>(
+            Collections.singletonList(new AgentCallInterface())));
+        source.setTags(new ArrayList<String>(Collections.singletonList("assistant")));
+        source.setExtensions(new HashMap<String, Object>(
+            Collections.<String, Object>singletonMap("region", "east")));
+        source.setAutoSubmit(true);
+        
+        AgentPublishRequest result = AgentModelUtils.copyPublishRequest(source);
+        assertNotSame(source, result);
+        assertNotSame(source.getCallInterfaces(), result.getCallInterfaces());
+        assertNotSame(source.getTags(), result.getTags());
+        assertNotSame(source.getExtensions(), result.getExtensions());
+        assertEquals(true, result.isAutoSubmit());
+        source.getTags().clear();
+        assertEquals("assistant", result.getTags().get(0));
+        
+        assertThrows(NacosException.class, () -> AgentModelUtils.copyPublishRequest(null));
+        result.setCallInterfaces(null);
+        assertThrows(NacosException.class, () -> AgentModelUtils.copyPublishRequest(result));
+    }
+    
+    @Test
+    void copyPublishRequestMapsCopyFailure() {
+        AgentPublishRequest source = new AgentPublishRequest();
+        try (MockedStatic<JsonUtils> json = Mockito.mockStatic(JsonUtils.class)) {
+            json.when(() -> JsonUtils.toJson(source)).thenThrow(new IllegalStateException("boom"));
+            assertEquals(NacosException.INVALID_PARAM,
+                assertThrows(NacosException.class,
+                    () -> AgentModelUtils.copyPublishRequest(source)).getErrCode());
+        }
     }
     
     @Test
@@ -226,11 +272,36 @@ class AgentModelUtilsTest {
         source.setVersion("1.0.0");
         source.setContentDigest(
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        RuntimeVersionBinding binding = new RuntimeVersionBinding();
+        binding.setRuntimeVersion("1.0.0");
+        binding.setVersionRange("[1.0.0]");
+        AgentDiscoveryEndpoint endpoint = new AgentDiscoveryEndpoint();
+        endpoint.setUri("http://localhost:80/agent");
+        endpoint.setTransport("http");
+        endpoint.setHealthy(true);
+        endpoint.setBindings(new ArrayList<RuntimeVersionBinding>(
+            Collections.singletonList(binding)));
+        EndpointSet endpointSet = new EndpointSet();
+        endpointSet.setSource(EndpointSource.RUNTIME);
+        endpointSet.setSourceRevision(
+            "murmur3-x64-128-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        endpointSet.setEndpoints(new ArrayList<AgentDiscoveryEndpoint>(
+            Collections.singletonList(endpoint)));
+        AgentDiscoveryCallInterface callInterface = new AgentDiscoveryCallInterface();
+        callInterface.setProtocol("a2a");
+        callInterface.setEndpointSets(Collections.singletonList(endpointSet));
+        source.setCallInterfaces(Collections.singletonList(callInterface));
         
         AgentDiscoveryResult result = AgentModelUtils.copyDiscoveryResult(source);
         
         assertNotSame(source, result);
         assertEquals("agent-a", result.getAgentName());
+        AgentDiscoveryEndpoint copiedEndpoint = result.getCallInterfaces().get(0)
+            .getEndpointSets().get(0).getEndpoints().get(0);
+        assertNotSame(endpoint, copiedEndpoint);
+        assertNotSame(endpoint.getBindings(), copiedEndpoint.getBindings());
+        binding.setRuntimeVersion("2.0.0");
+        assertEquals("1.0.0", copiedEndpoint.getBindings().get(0).getRuntimeVersion());
     }
     
     private AgentReference reference() {

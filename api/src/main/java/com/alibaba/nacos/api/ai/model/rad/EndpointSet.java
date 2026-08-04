@@ -16,7 +16,6 @@
 
 package com.alibaba.nacos.api.ai.model.rad;
 
-import com.alibaba.nacos.api.ai.model.agent.Endpoint;
 import com.alibaba.nacos.api.ai.model.agent.EndpointSource;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
@@ -37,7 +36,7 @@ public class EndpointSet implements Serializable {
     
     private String sourceRevision;
     
-    private List<Endpoint> endpoints;
+    private List<AgentDiscoveryEndpoint> endpoints;
     
     public EndpointSource getSource() {
         return source;
@@ -55,11 +54,11 @@ public class EndpointSet implements Serializable {
         this.sourceRevision = sourceRevision;
     }
     
-    public List<Endpoint> getEndpoints() {
+    public List<AgentDiscoveryEndpoint> getEndpoints() {
         return endpoints;
     }
     
-    public void setEndpoints(List<Endpoint> endpoints) {
+    public void setEndpoints(List<AgentDiscoveryEndpoint> endpoints) {
         this.endpoints = endpoints;
     }
 }

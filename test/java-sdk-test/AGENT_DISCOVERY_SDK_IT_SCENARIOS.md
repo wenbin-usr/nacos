@@ -40,19 +40,20 @@ Watch request, Push payload, ACK, or Watch ability.
 
 | IT method | Scenario groups |
 | --- | --- |
-| `shouldInteroperateWithLegacyA2aSdk` | Legacy A2A SDK definition release, canonical Console and RAD reads, duplicate no-overwrite, legacy exact-Version Endpoint registration and SERVICE query, explicit isolation from the new Runtime Registry, canonical Version publication, and legacy latest-subscription convergence. |
+| `shouldInteroperateWithLegacyA2aSdk` | Legacy A2A SDK definition release, canonical Console and RAD reads, duplicate no-overwrite, legacy exact-Version Endpoint registration into the canonical Runtime Registry without Beta dual-write to the historical Naming service, Console Runtime Snapshot and legacy SERVICE query agreement, Version 2 pre-registration, omitted-selector multi-Version aggregation versus explicit-latest isolation, canonical Version publication, and legacy latest-subscription convergence. |
 | `shouldSearchDiscoverAndIsolateNamespaces` | Default and custom namespaces; default, individual, combined, empty, and paged Search; latest/exact/label Discover; combined filters; caller immutability; explicit and mismatched namespace binding; namespace-isolated publication. |
 | `shouldReplaceAndPartiallyDeregisterCompletePublications` | Complete register, identical idempotence, replacement convergence, canonical natural-key partial deregistration, unknown/repeated no-op, final deregistration, and protocol isolation. |
 | `shouldAggregateIndependentSdkPublishers` | Two SDK identities contributing the same natural key and last-contributor removal. |
 | `shouldDiscoverPreRegistrationAndPollUntilAgentAppears` | Pre-registration, missing Discover, subscribe-before-create, complete callback snapshot, unsubscribe, and post-unsubscribe suppression. |
 | `shouldPollExistingAgentOnlyWhenCompleteFingerprintChanges` | Subscribe-existing current value, Runtime source-revision replacement event, and unchanged-fingerprint callback de-duplication. |
 | `shouldTrackVersionEvolutionAcrossRegistrationOrders` | Version 1 definition-first, Version 2 Endpoint-first, Version 3 definition-first, latest/exact/label subscriptions, catalog order, and offline/online latest recalculation. |
+| `shouldSeparateDefaultRolloutPoolFromExplicitLatest` | Two independent publishers keep exact Version 1 and Version 2 Endpoints concurrently. The omitted selector uses latest Version metadata while aggregating every online Version's compatible Endpoints; explicit `label=latest` remains latest-only. The workflow verifies the interval before Version 2 Endpoint registration, the combined pool after registration, Version 1 removal after it goes offline, binding provenance, and polling callback de-duplication for both selectors. |
 | `shouldApplyPublicationRangeAcrossOnlineVersions` | Inclusive Version ranges, replacement with a different range, matching exact Versions, and exclusion of nonmatching Versions. |
 | `shouldDeregisterActiveHttpPublicationDuringIdempotentShutdown` | HTTP publication cleanup during active and repeated SDK shutdown. |
 | `shouldKeepHttpAndGrpcDiscoverySemanticsEquivalent` | Search, Discover, HTTP publication, gRPC observation, and deregistration transport parity. |
 | `shouldRejectInvalidBoundariesBeforeRemoteMutation` | Nulls, page boundaries, duplicate filters/natural keys, namespace mismatch, reference ambiguity, invalid protocol/URI/transport/version/range, empty publication, server-owned health, invalid deregistration payload, unknown local no-op, and not-found mapping. |
 
-The same eleven stable workflows pass with both the default JSON adapter and
+The same twelve stable workflows pass with both the default JSON adapter and
 `jackson3`. Existing `AiServiceJavaSdkITCase` runs with them as a compatibility
 regression. The opt-in
 `shouldRestoreGrpcAndHttpPublicationsAndPollingAfterRealServerRestart` workflow also passed
@@ -97,7 +98,9 @@ is never stopped.
 
 | Scenario | Expected result | Coverage |
 | --- | --- | --- |
-| Discover latest, exact Version, and label references | Each reference resolves to the expected complete Version snapshot. | IT |
+| Discover with no Version or label | Definition metadata resolves from latest while Runtime Endpoints aggregate bindings compatible with every online Version. | IT + UT |
+| Discover with explicit `label=latest` | Definition metadata and Runtime Endpoints are both restricted to the current latest Version. | IT + UT |
+| Discover exact Version and custom label references | Each reference resolves definition metadata and Runtime Endpoints for only that exact resolved Version. | IT |
 | Discover with no Filter | All permitted call interfaces and Endpoint sources are retained. | IT |
 | Filter by protocol and protocolVersion | Matching interfaces remain; no match returns `callInterfaces=[]`. | IT |
 | Filter by Endpoint source | Matching interface remains; no matching source returns `endpointSets=[]`. | IT |
@@ -118,14 +121,17 @@ Endpoint, and replacement across an already-online Version.
 
 | Scenario | Expected result | Coverage |
 | --- | --- | --- |
-| Publish Version 1, then register its exact Endpoint Batch | Latest and exact-Version Discover both return Version 1 and the Runtime Endpoint. | IT |
+| Publish Version 1, then register its exact Endpoint Batch | Omitted, explicit-latest, and exact-Version Discover all return Version 1 and the Runtime Endpoint. | IT |
 | Register an exact Version 2 Batch before Version 2 exists | Registration succeeds; latest Version 1 remains discoverable but the Version 2-only Endpoint is filtered out. | IT |
-| Publish Version 2 after its Batch was pre-registered | Search changes `latestVersion` to Version 2; latest and exact-Version Discover immediately return Version 2 with its pre-registered Endpoint. | IT |
+| Publish Version 2 before registering its Endpoint | Search and both selector modes use Version 2 metadata. Omitted Discover retains the Version 1 Endpoint, while explicit latest returns an empty Runtime set. | IT + UT |
+| Register Version 2 from a publisher independent of Version 1 | Omitted Discover returns Version 1 and Version 2 Endpoints with their bindings; explicit latest returns only Version 2. | IT + UT |
+| Take Version 1 offline while Version 2 remains online | Omitted Discover removes the Version 1-only Endpoint; explicit latest is unchanged and does not emit a duplicate callback. | IT + UT |
 | Keep a custom label on Version 1 while latest advances | Label Discover remains on Version 1 and does not follow latest implicitly. | IT |
 | Move the custom label from Version 1 to Version 2 | Label Discover and the matching polling subscription atomically move to Version 2. | IT |
-| Publish Version 3 before registering its exact Batch | Latest Discover changes to Version 3 with an empty Runtime set; the later Register changes only its Runtime source revision. | IT |
+| Publish Version 3 before registering its exact Batch | Explicit-latest Discover changes to Version 3 with an empty Runtime set; omitted Discover retains Endpoints compatible with older online Versions. The later Register changes the relevant Runtime source revision. | IT |
 | Exact Version 1 subscription while latest moves through later Versions | It does not receive a Version-change callback; it changes only if the Version 1 content or matching source revision changes. | IT + UT |
-| Latest subscription through Endpoint replacement and Version changes | It receives complete replacement snapshots for the Version/source-revision changes and suppresses unchanged polls. | IT + UT |
+| Omitted-selector subscription through a latest change | It receives latest metadata immediately but keeps older online-version Endpoints until their Versions go offline. | IT + UT |
+| Explicit-latest subscription through Endpoint replacement and Version changes | It switches strictly to the new latest pool, including an intentionally empty interval, and suppresses unchanged polls. | IT + UT |
 | Search after multiple online Versions | One catalog entry lists all online Versions in descending SemVer order and reports the current latest. | IT |
 | Publication range spans multiple Versions | Every matching exact/latest Discover sees the shared Endpoint; a nonmatching Version does not. | IT + UT |
 | Offline and then bring the current latest online while another Version remains online | Search/Discover follow the server-managed recalculated latest without changing publisher intent. | IT |
@@ -141,6 +147,7 @@ Endpoint, and replacement across an already-online Version.
 | Resolved Version changes | One complete replacement event is delivered. | IT + UT |
 | `contentDigest` changes | One complete replacement event is delivered. | UT |
 | Any `sourceRevision` changes | One complete replacement event is delivered. | IT + UT |
+| A Runtime binding changes while its Endpoint payload and health stay equal | The v2 Runtime revision changes because discovery-visible binding provenance is part of the snapshot. | UT |
 | A Filter produces a typed empty result | That result is cached and can replace an earlier non-empty snapshot. | UT |
 | Same reference/filter and two listener instances | Listener identities are isolated and both receive changes. | UT |
 | Repeat subscribe with the same listener identity | Only one polling record and one callback per change are retained. | UT |
@@ -206,12 +213,12 @@ continues only after the harness writes a restarted marker.
 
 | Phase | Operations and assertions | Coverage |
 | --- | --- | --- |
-| Initial server | Create and publish Version 1; register independent gRPC and HTTP Endpoint Batches; Search, latest/exact Discover, and polling subscriptions over both transports all agree. | Directed IT |
+| Initial server | Create and publish a legacy-compatible Version 1; pre-register legacy exact-Version Endpoints for Versions 1 and 2 into the canonical Runtime Service; register independent protocol-neutral gRPC and HTTP Endpoint Batches on the same SDK connection; Search, legacy SERVICE query, latest/exact Discover, Runtime bindings, and polling subscriptions agree without publication overwrite. | Directed IT |
 | Server unavailable | Keep the same gRPC and HTTP SDK instances and their local subscription/publication intent; both transports observe connection unavailability, but the client process stays alive and no local intent is deleted. | Directed IT + UT |
-| Same server restarted | The gRPC SDK reconnects and redoes its complete Batch. The HTTP heartbeat receives `HTTP_CLIENT_NOT_FOUND`, retains the same external HTTP client id, creates fresh server state, and re-registers its complete Batch. Polling over both transports resumes and converges. | Directed IT + UT |
-| Definition-first upgrade after reconnect | Create and publish Version 2 before registering either exact Batch; latest single Discover and both subscriptions first observe Version 2 with an empty Runtime set, then observe the gRPC Endpoint and finally the HTTP Endpoint. | Directed IT |
+| Same server restarted | The gRPC SDK reconnects and redoes its protocol-neutral complete Batch plus both legacy exact-Version publications. The HTTP heartbeat receives `HTTP_CLIENT_NOT_FOUND`, retains the same external HTTP client id, creates fresh server state, and re-registers its complete Batch. Legacy child publishers are rebuilt on the new connection, Runtime bindings recover independently, and polling over both transports converges. | Directed IT + UT |
+| Endpoint-first upgrade after reconnect | Create and publish Version 2 after its legacy Endpoint was already registered and recovered; legacy SERVICE query, RAD Discover, and both subscriptions immediately resolve that canonical Runtime Endpoint. Later protocol-neutral gRPC and HTTP publishers add their independent contributions without replacing it. | Directed IT |
 | Exact and label checks after reconnect | Exact Version 1 remains resolvable, exact/latest Version 2 agree through both transports, and a moved custom label resolves Version 2. | Directed IT |
-| Cleanup | Unsubscribe both listeners, deregister both final publications, delete the Agent, and shut down clients while the restarted server remains usable for later IT. | Directed IT |
+| Cleanup | Unsubscribe both listeners, deregister both protocol-neutral final publications and the legacy Version 2 publication, verify the exact Runtime pool becomes empty, delete the Agent, and shut down clients while the restarted server remains usable for later IT. | Directed IT |
 
 The directed case has a bounded wait for both markers and every server/client
 convergence assertion. Missing harness coordination produces a skipped or
@@ -222,7 +229,7 @@ failed targeted run rather than a sleeping normal CI test.
 | Workflow | Cross-checks | Coverage |
 | --- | --- | --- |
 | Maintainer creates and publishes an Agent, then SDK Search and Discover | Admin write is visible through both Client read operations. | IT |
-| Legacy A2A SDK releases an AgentCard and old exact-Version Endpoint, then Console, RAD, and legacy SERVICE reads inspect it; Maintainer publishes a complete A2A Version, then legacy A2A query and latest subscription read it | Legacy and protocol-neutral surfaces share the canonical Agent definition in both directions; duplicate release does not overwrite an online Version; old Endpoint data remains deliberately isolated in legacy exact-Version Naming and does not appear in the new Runtime Registry. | IT |
+| Legacy A2A SDK releases an AgentCard and old exact-Version Endpoints for Versions 1 and 2, then Console Runtime Snapshot, RAD, legacy SERVICE, and direct Naming reads inspect them; Maintainer publishes Version 2, then omitted/default and explicit-latest discovery compare pools | Legacy and protocol-neutral surfaces share the canonical Agent definition and Runtime Service; duplicate release does not overwrite an online Version; pre-registration does not create a definition; exact bindings survive independently; the historical Version-specific Naming service remains empty in Beta; omitted selection aggregates both online Versions while explicit latest contains only Version 2. | IT |
 | SDK pre-registers Endpoint, Maintainer creates/publishes Agent, SDK Discover | Pre-registration becomes visible without implicit definition creation. | IT |
 | Maintainer publishes Agent, SDK registers/replaces/partially deregisters/finally deregisters | Discover observes full replacement, remainder, and empty Runtime source in order. | IT |
 | Two SDK publishers register the same Endpoint, one deregisters, then the other deregisters | Aggregated visibility remains until the last contribution is removed. | IT |
@@ -232,6 +239,7 @@ failed targeted run rather than a sleeping normal CI test.
 | Same workflow through gRPC and explicit HTTP clients | Query shapes and publication semantics are transport-equivalent. | IT |
 | Public and custom namespace workflows run together | Search, Discover, subscription, and publication never cross namespaces. | IT |
 | Version 1 online + Version 2 Endpoint pre-registration + Version 2 publish | Search, latest/exact/label Discover, and subscriptions agree at every transition. | IT |
+| Version 1 online + Version 2 publish before Endpoint registration + independent Version 2 publisher | Omitted selection preserves the rollout pool across the transition, explicit latest observes only Version 2, and both polling subscriptions converge without duplicate callbacks. | IT |
 | Real standalone restart with active gRPC and HTTP publications and polling subscriptions | The same live SDK process restores both transport-owned complete Batches, resumes both polling loops, then observes a later Version and both Endpoints. | Directed IT |
 
 ## Deferred In This Phase
@@ -239,7 +247,6 @@ failed targeted run rather than a sleeping normal CI test.
 | Item | Reason |
 | --- | --- |
 | Server Watch/Push, `watchKey`, Push ACK, gap recovery, and Watch ability | The approved first version uses active Discover polling. |
-| Generic Agent code publication and `autoSubmit` | Explicit later enhancement in the design. |
 | Public `getAll` / `selectOneHealthy` helper API shape | The design states local selection semantics but does not yet specify a stable Java type and method signature. It does not block Search, Discover, polling, or publication and is recorded rather than invented in this phase. |
 | Agent management-metadata change notification | `AgentDiscoveryResult` intentionally excludes display name, description, tags, provider, and other management metadata. Its polling fingerprint contains only resolved Version, Version `contentDigest`, and Endpoint `sourceRevision` values. A future requirement to subscribe to forced updates of published Agent metadata needs a Search/catalog subscription or an explicit RAD contract extension; it is not inferred by the current Discover subscription. |
 | Packet loss at individual frames and unknown gRPC write-result ambiguity | Covered with deterministic unit fault injection; a real single-node process restart is covered separately, while frame-level fault injection is not stable standalone IT. |
