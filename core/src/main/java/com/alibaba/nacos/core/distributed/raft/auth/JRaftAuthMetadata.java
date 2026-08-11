@@ -14,11 +14,23 @@
  * limitations under the License.
  */
 
-package com.alibaba.nacos.plugin.visibility.spi;
+package com.alibaba.nacos.core.distributed.raft.auth;
 
-public class SpiBrokenVisibilityService extends SpiLoadedVisibilityService {
+import io.grpc.Metadata;
+
+/**
+ * Metadata keys used to transport Nacos server identity over JRaft gRPC.
+ *
+ * @author xiweng.yy
+ */
+final class JRaftAuthMetadata {
     
-    public SpiBrokenVisibilityService() {
-        throw new IllegalStateException("broken visibility service");
+    static final Metadata.Key<String> IDENTITY_KEY = Metadata.Key.of(
+        "nacos-server-identity-key", Metadata.ASCII_STRING_MARSHALLER);
+    
+    static final Metadata.Key<String> IDENTITY_VALUE = Metadata.Key.of(
+        "nacos-server-identity-value", Metadata.ASCII_STRING_MARSHALLER);
+    
+    private JRaftAuthMetadata() {
     }
 }
