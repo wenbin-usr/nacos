@@ -94,7 +94,8 @@ namespace inputs are expected to use `public`, and beta/tag gray behavior is
 verified through the current gray model. Batch delete and export-by-id scenarios
 verify that storage IDs remain scoped by the requested namespace, and clone
 scenarios verify that storage IDs are resolved only within the requested source
-namespace before writing to the target namespace. Removed pre-3.0 compatibility
+namespace before writing to the target namespace. Config, history, and capacity
+responses also verify that storage IDs remain JSON strings. Removed pre-3.0 compatibility
 migration paths, including empty-tenant storage migration and legacy
 `config_info_beta` / `config_info_tag` old-table migration, are not counted as
 missing OpenAPI IT coverage.
@@ -117,6 +118,14 @@ covered by service tests because the standalone suite does not install a
 deterministic publish pipeline that can create those states. Service tests also
 verify that a terminal result marked `historical=true` remains an idempotent
 `reviewing` submit because it belongs to a previous review cycle.
+
+AI Agent, AgentSpec, Prompt, and Skill deletion success and post-delete absence
+remain covered by the existing Admin and Console rows. Storage-provider failure,
+multi-file partial failure, persisted-provider routing, and deletion of more
+than one storage page are covered by focused service tests because the
+standalone suite has no storage fault-injection provider and cannot safely seed
+those failure states. Those tests verify that the HTTP service reports the
+cleanup error and retains the resource/version descriptors for retry.
 
 Agent Admin definition creation is counted in the existing Agent Admin and
 Version scenario rows. The unified `POST /v3/admin/ai/agents/draft` operation

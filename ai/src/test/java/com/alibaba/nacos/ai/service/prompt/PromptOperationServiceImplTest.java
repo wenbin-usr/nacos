@@ -68,9 +68,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -94,6 +97,9 @@ class PromptOperationServiceImplTest {
     
     @Mock
     private AiResourceStorage storage;
+    
+    @Mock
+    private AiResourceStorage externalStorage;
     
     @Mock
     private AiResourcePersistService aiResourcePersistService;
@@ -124,7 +130,9 @@ class PromptOperationServiceImplTest {
         EnvUtil.setEnvironment(new StandardEnvironment());
         AiResourceStorageRouter.reset();
         lenient().when(storage.type()).thenReturn("nacos_config");
+        lenient().when(externalStorage.type()).thenReturn("external");
         AiResourceStorageRouter.join(storage);
+        AiResourceStorageRouter.join(externalStorage);
         PublishPipelineManager pipelineManager = TestAiPipelineSupport.newManager(false,
             Collections.emptyList(), Collections.emptyList());
         PublishPipelineExecutor publishPipelineExecutor =
@@ -270,12 +278,16 @@ class PromptOperationServiceImplTest {
         AiResource meta =
             createMeta(PROMPT_KEY, 1L, "{\"labels\":{},\"editingVersion\":\"0.0.1\"}");
         when(aiResourcePersistService.find(NS, PROMPT_KEY, PROMPT_TYPE)).thenReturn(meta);
+        AiResourceVersion draft = createVersionRow("0.0.1", "draft");
+        draft.setStorage("{\"provider\":\"external\"}");
         when(aiResourceVersionPersistService.find(NS, PROMPT_KEY, PROMPT_TYPE, "0.0.1"))
-            .thenReturn(createVersionRow("0.0.1", "draft"));
+            .thenReturn(draft);
         
         service.updateDraft(NS, PROMPT_KEY, "updated template", null, "update msg");
         
-        verify(storage).save(any(StorageKey.class), any(byte[].class));
+        verify(externalStorage).save(argThat(key -> "external".equals(key.getProvider())),
+            any(byte[].class));
+        verify(storage, never()).save(any(StorageKey.class), any(byte[].class));
     }
     
     @Test
@@ -306,15 +318,18 @@ class PromptOperationServiceImplTest {
         AiResource meta =
             createMeta(PROMPT_KEY, 1L, "{\"labels\":{},\"editingVersion\":\"0.0.1\"}");
         when(aiResourcePersistService.find(NS, PROMPT_KEY, PROMPT_TYPE)).thenReturn(meta);
+        AiResourceVersion draft = createVersionRow("0.0.1", "draft");
+        draft.setStorage("{\"provider\":\"external\",\"files\":[\"content.json\"]}");
         when(aiResourceVersionPersistService.find(NS, PROMPT_KEY, PROMPT_TYPE, "0.0.1"))
-            .thenReturn(createVersionRow("0.0.1", "draft"));
+            .thenReturn(draft);
         when(aiResourcePersistService.updateMetaCas(eq(NS), eq(PROMPT_KEY), eq(PROMPT_TYPE), eq(1L),
             any(AiResource.class))).thenReturn(true);
         
         service.deleteDraft(NS, PROMPT_KEY);
         
         verify(aiResourceVersionPersistService).delete(NS, PROMPT_KEY, PROMPT_TYPE, "0.0.1");
-        verify(storage).delete(any(StorageKey.class));
+        verify(externalStorage).delete(argThat(key -> "external".equals(key.getProvider())));
+        verify(storage, never()).delete(any(StorageKey.class));
     }
     
     @Test
@@ -412,8 +427,10 @@ class PromptOperationServiceImplTest {
             createMeta(PROMPT_KEY, 1L, "{\"labels\":{},\"editingVersion\":\"0.0.1\"}");
         when(aiResourcePersistService.find(NS, PROMPT_KEY, PROMPT_TYPE)).thenReturn(meta);
         // Target version exists but is already online (formal version).
+        AiResourceVersion version = createVersionRow("0.0.1", "online");
+        version.setStorage("{\"provider\":\"external\"}");
         when(aiResourceVersionPersistService.find(NS, PROMPT_KEY, PROMPT_TYPE, "0.0.1"))
-            .thenReturn(createVersionRow("0.0.1", "online"));
+            .thenReturn(version);
         
         NacosApiException ex = assertThrows(NacosApiException.class,
             () -> service.submit(NS, PROMPT_KEY, "0.0.1"));
@@ -887,12 +904,41 @@ class PromptOperationServiceImplTest {
         AiResourceVersion v1 = createVersionRow("0.0.1", "online");
         vPage.setPageItems(Collections.singletonList(v1));
         when(aiResourceVersionPersistService.list(eq(NS), eq(PROMPT_KEY), eq(PROMPT_TYPE), any(),
-            eq(1), eq(200))).thenReturn(vPage);
+            eq(1), anyInt())).thenReturn(vPage);
         
         service.deletePrompt(NS, PROMPT_KEY);
         
+        verify(storage).delete(any(StorageKey.class));
         verify(aiResourceVersionPersistService).deleteByNameAndType(NS, PROMPT_KEY, PROMPT_TYPE);
         verify(aiResourcePersistService).delete(NS, PROMPT_KEY, PROMPT_TYPE);
+    }
+    
+    @Test
+    void testDeletePromptShouldUsePersistedProviderAndKeepRowsOnStorageFailure()
+        throws NacosException {
+        AiResource meta = createMeta(PROMPT_KEY, 1L, "{\"labels\":{}}");
+        when(aiResourcePersistService.find(NS, PROMPT_KEY, PROMPT_TYPE)).thenReturn(meta);
+        AiResourceStorage persistedStorage = mock(AiResourceStorage.class);
+        when(persistedStorage.type()).thenReturn("persisted-provider");
+        AiResourceStorageRouter.join(persistedStorage);
+        AiResourceVersion version = createVersionRow("0.0.1", "online");
+        version.setStorage("{\"provider\":\"persisted-provider\","
+            + "\"scope\":\"public:test-prompt:0.0.1\",\"files\":[\"prompt.json\"]}");
+        Page<AiResourceVersion> versionPage = new Page<>();
+        versionPage.setPageItems(Collections.singletonList(version));
+        when(aiResourceVersionPersistService.list(eq(NS), eq(PROMPT_KEY), eq(PROMPT_TYPE), any(),
+            eq(1), anyInt())).thenReturn(versionPage);
+        NacosException storageFailure =
+            new NacosException(NacosException.SERVER_ERROR, "storage delete failed");
+        doThrow(storageFailure).when(persistedStorage).delete(any(StorageKey.class));
+        
+        assertThrows(NacosException.class, () -> service.deletePrompt(NS, PROMPT_KEY));
+        
+        verify(persistedStorage).delete(any(StorageKey.class));
+        verify(storage, never()).delete(any(StorageKey.class));
+        verify(aiResourceVersionPersistService, never()).deleteByNameAndType(anyString(),
+            anyString(), anyString());
+        verify(aiResourcePersistService, never()).delete(anyString(), anyString(), anyString());
     }
     
     @Test
@@ -928,7 +974,7 @@ class PromptOperationServiceImplTest {
     }
     
     @Test
-    void testDeletePromptShouldNotFailWhenLegacyMirrorDeleteThrows() throws NacosException {
+    void testDeletePromptShouldKeepRowsWhenLegacyMirrorDeleteThrows() throws NacosException {
         AiResource meta = createMeta(PROMPT_KEY, 1L, "{\"labels\":{}}");
         when(aiResourcePersistService.find(NS, PROMPT_KEY, PROMPT_TYPE)).thenReturn(meta);
         
@@ -941,11 +987,11 @@ class PromptOperationServiceImplTest {
             any(), anyString(),
             any())).thenThrow(new RuntimeException("simulated failure"));
         
-        // Should NOT throw despite legacy mirror delete failure
-        service.deletePrompt(NS, PROMPT_KEY);
+        assertThrows(NacosException.class, () -> service.deletePrompt(NS, PROMPT_KEY));
         
-        verify(aiResourceVersionPersistService).deleteByNameAndType(NS, PROMPT_KEY, PROMPT_TYPE);
-        verify(aiResourcePersistService).delete(NS, PROMPT_KEY, PROMPT_TYPE);
+        verify(aiResourceVersionPersistService, never()).deleteByNameAndType(anyString(),
+            anyString(), anyString());
+        verify(aiResourcePersistService, never()).delete(anyString(), anyString(), anyString());
     }
     
     // ========== getPromptDetail / getPromptVersionDetail ==========
@@ -974,18 +1020,23 @@ class PromptOperationServiceImplTest {
     void testGetPromptVersionDetailSuccessfully() throws NacosException {
         AiResource meta = createMeta(PROMPT_KEY, 1L, "{\"labels\":{}}");
         when(aiResourcePersistService.find(NS, PROMPT_KEY, PROMPT_TYPE)).thenReturn(meta);
+        AiResourceVersion version = createVersionRow("0.0.1", "online");
+        version.setStorage("{\"provider\":\"external\"}");
         when(aiResourceVersionPersistService.find(NS, PROMPT_KEY, PROMPT_TYPE, "0.0.1"))
-            .thenReturn(createVersionRow("0.0.1", "online"));
+            .thenReturn(version);
         
         PromptVersionInfo content = new PromptVersionInfo();
         content.setTemplate("hello");
-        mockStorageGet(JacksonUtils.toJson(content).getBytes(StandardCharsets.UTF_8));
+        when(externalStorage.get(any(StorageKey.class)))
+            .thenReturn(JacksonUtils.toJson(content).getBytes(StandardCharsets.UTF_8));
         
         PromptVersionInfo result = service.getPromptVersionDetail(NS, PROMPT_KEY, "0.0.1");
         
         assertNotNull(result);
         assertEquals(PROMPT_KEY, result.getPromptKey());
         assertEquals("0.0.1", result.getVersion());
+        verify(externalStorage).get(argThat(key -> "external".equals(key.getProvider())));
+        verify(storage, never()).get(any(StorageKey.class));
     }
     
     // ========== listPrompts / listPromptVersions ==========
@@ -1102,6 +1153,8 @@ class PromptOperationServiceImplTest {
     void testRefreshLatestMirrorPublishesToLegacyConfig() throws NacosException {
         AiResource meta = createMeta(PROMPT_KEY, 1L, "{\"labels\":{\"latest\":\"0.0.1\"}}");
         when(aiResourcePersistService.find(NS, PROMPT_KEY, PROMPT_TYPE)).thenReturn(meta);
+        when(aiResourceVersionPersistService.find(NS, PROMPT_KEY, PROMPT_TYPE, "0.0.1"))
+            .thenReturn(createVersionRow("0.0.1", "online"));
         
         PromptVersionInfo content = new PromptVersionInfo();
         content.setTemplate("hello");
@@ -1133,6 +1186,9 @@ class PromptOperationServiceImplTest {
         row.setVersion(version);
         row.setStatus(status);
         row.setAuthor("-");
+        row.setStorage("{\"provider\":\"nacos_config\","
+            + "\"scope\":\"public:test-prompt:" + version
+            + "\",\"files\":[\"prompt.json\"]}");
         return row;
     }
     

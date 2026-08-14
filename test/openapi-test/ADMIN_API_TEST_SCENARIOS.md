@@ -42,6 +42,15 @@ force-publish endpoints. AgentSpec parser tests additionally verify plural
 path recognition, namespace-range list semantics, and draft target resolution
 from `agentSpecCard.name`.
 
+## AI Resource Deletion Failure Coverage
+
+The Agent, AgentSpec, Prompt, and Skill rows cover successful deletion and
+post-delete absence. Storage-provider failure, multi-file partial failure,
+persisted-provider routing, and deletion beyond one storage page are covered by
+focused service tests because the standalone profile has no storage
+fault-injection provider. The service tests verify that cleanup errors reach the
+API layer and resource/version descriptors remain available for retry.
+
 ## Config
 
 | API surface / IT class | Covered API operations | Current status | Current / missing coverage |
@@ -54,9 +63,9 @@ from `agentSpecCard.name`.
 | `ConfigImportAdminApiOpenApiITCase` | `POST /v3/admin/cs/config/import` | Covered | Imports a metadata ZIP and verifies the imported config can be queried; covers public namespace defaulting, `ABORT` policy, missing file, malformed metadata ZIP, and business failures in v3 Result form. |
 | `ConfigExportAdminApiOpenApiITCase` | `GET /v3/admin/cs/config/export` | Covered | Exports config by ids and namespace as downloadable ZIP containing config entries and metadata; covers public namespace defaulting, namespace-scoped id export when ids belong to another namespace, query serialization, invalid namespace, absent ids, and non-JSON download/error response variants. |
 | `ConfigCloneAdminApiOpenApiITCase` | `POST /v3/admin/cs/config/clone` | Covered | Clones existing configs to target dataId/group/namespace and verifies queried target content; covers optional `sourceNamespaceId`, source-scoped ID resolution, IDs outside the source namespace returning controlled `DATA_EMPTY`, required namespace, empty clone list rejection, malformed clone payload, business failures, and v3 error bodies. |
-| `ConfigHistoryAdminApiOpenApiITCase` | `GET /v3/admin/cs/history`<br>`GET /v3/admin/cs/history/list`<br>`GET /v3/admin/cs/history/previous`<br>`GET /v3/admin/cs/history/configs` | Covered | Publishes/republishes config and verifies history list, detail, previous, and configs history queries; covers large page size, required paging and identity fields, absent/mismatched history, and controlled errors. |
+| `ConfigHistoryAdminApiOpenApiITCase` | `GET /v3/admin/cs/history`<br>`GET /v3/admin/cs/history/list`<br>`GET /v3/admin/cs/history/previous`<br>`GET /v3/admin/cs/history/configs` | Covered | Publishes/republishes config and verifies history list, detail, previous, and configs history queries; verifies config and history storage IDs remain JSON strings; covers large page size, required paging and identity fields, absent/mismatched history, and controlled errors. |
 | `ConfigListenerAdminApiOpenApiITCase` | `GET /v3/admin/cs/config/listener`<br>`GET /v3/admin/cs/listener` | Covered | Queries config-scoped and IP-scoped listener state; covers public namespace defaulting, `aggregation=false`, required dataId/group/ip, and HTTP 400 validation envelopes. |
-| `ConfigCapacityAdminApiOpenApiITCase` | `GET,POST /v3/admin/cs/capacity` | Covered | Updates and queries group/namespace capacity limits; covers identity requirements, at-least-one capacity field, and validation error envelopes. There is no public delete endpoint for capacity rows. |
+| `ConfigCapacityAdminApiOpenApiITCase` | `GET,POST /v3/admin/cs/capacity` | Covered | Updates and queries group/namespace capacity limits and verifies the capacity storage ID remains a JSON string; covers identity requirements, at-least-one capacity field, and validation error envelopes. There is no public delete endpoint for capacity rows. |
 | `ConfigMetricsAdminApiOpenApiITCase` | `GET /v3/admin/cs/metrics` | Covered | Queries config metrics and verifies JSON object shape; covers parameter-free request behavior and success response contract. |
 | `ConfigOpsAdminApiOpenApiITCase` | `POST /v3/admin/cs/ops/localCache`<br>`PUT /v3/admin/cs/ops/log`<br>`GET /v3/admin/cs/ops/derby`<br>`POST /v3/admin/cs/ops/derby/import` | Partial | Triggers local-cache dump success and verifies ops validation; covers log update required params, Derby query required `sql`, Derby import disabled/non-embedded controlled failure, and intentionally avoids successful DB import because it mutates embedded storage. |
 
