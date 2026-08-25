@@ -50,6 +50,9 @@ Context rules:
   and remote/source address information.
 - `AuthContext` records API type, parsed identity, resource, and auth result
   when an auth filter has executed.
+- Parsed identity records the canonical names of identity parameters actually
+  extracted from the request separately from transport-derived and
+  plugin-enriched metadata. HTTP identity names are matched case-insensitively.
 - Extension contexts may add runtime metadata, but must not redefine standard
   fields or store durable domain state.
 - Context is runtime-only. It is not persisted, not a cluster replication
@@ -113,7 +116,9 @@ HTTP controller-method resolution rules:
 - `nacos.core.auth.controller-method-cache.legacy-enabled=true` may temporarily downgrade method
   resolution to the legacy annotation cache. The legacy resolver is deprecated since 3.3.0,
   scheduled for removal in 3.4.0, and can differ from Spring MVC path matching, so it must remain
-  disabled by default.
+  disabled by default. While enabled, it must parse the request URI and context path consistently
+  before removing the context path, including when either value contains percent-encoded
+  characters.
 
 ## 4. gRPC Request Filter Model
 

@@ -43,7 +43,7 @@ namespaceId + resourceType + resourceName + version
 | 字段 | 含义 |
 | --- | --- |
 | `namespaceId` | Namespace 隔离边界。 |
-| `type` | 资源类型，例如 `agent`、`prompt`、`skill`、`agentspec`。 |
+| `type` | 资源类型，例如 `mcp`、`agent`、`prompt`、`skill`、`agentspec`。 |
 | `name` | 稳定资源名。 |
 | `desc` | 资源描述。 |
 | `status` | 资源元数据状态，目前为 `enable` 或 `disable`。 |
@@ -112,6 +112,19 @@ provider 路由。缺少 provider 的历史存储描述归属于 `nacos_config`�
 精确字段和重建规则由 [Agent 管理规范](agent-management-spec.md)与
 [Agent 存储规范](agent-storage-spec.md)定义。Runtime Agent Endpoint 遵循客户端拥有的
 Naming 生命周期，不写入 `AiResourceVersion.storage`。
+
+对 `type=mcp`，标准资源名为 `mcpName`。Resource `ext` 只保存 Schema Version 和已废弃的
+UUID 形态 `mcpId` 物理存储及旧 API 别名。Version `storage` Descriptor 通过 Allowlist
+限定的 `mcp-config-v1` Key 格式指向现有 MCP Server 和可选 Tools/Resources Config 对象；
+它不会复制、重写或扩展这些 Payload，也不会把它们变成用户拥有的 Config 资源。精确字段由
+[MCP Server 规范](mcp-server-spec.md)以及 MCP
+[Resource 扩展](../../schemas/ai/mcp/internal/v1/mcp-resource-ext.schema.json)和
+[Version Storage](../../schemas/ai/mcp/internal/v1/mcp-version-storage.schema.json) Schema 定义。
+
+MCP Runtime Endpoint 不写入 `AiResourceVersion.storage`，而是使用客户端拥有的 Naming
+运行时状态。MCP 普通 Service Ref 仍归其 Naming 用户所有；MCP Direct 持久 Naming Service
+继续作为当前 Endpoint 事实和兼容 Serving 契约，不会在生命周期托管时被 Version Config
+快照替代。
 
 ## 6. 可见性
 
