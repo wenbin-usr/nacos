@@ -28,11 +28,16 @@ The first migration has two management-route states:
 | State | Management route | Client and gateway serving route |
 | --- | --- | --- |
 | `SYNCING` | Historical MCP management remains authoritative while Resource and Version rows are reconciled. | Existing Manifest, Config, and Naming behavior is unchanged. |
-| `LIFECYCLE_MANAGED` | Admin, Console, and Maintainer operations use the common AI Resource lifecycle. | Existing Manifest, Config, and Naming behavior remains unchanged. |
+| `LIFECYCLE_MANAGED` | The complete compatible management operation set uses the common AI Resource lifecycle for both reads and writes. | Existing Manifest, Config, and Naming behavior remains unchanged. |
 
 `LIFECYCLE_MANAGED` is not a data-plane cutover. It does not make the
 historical Manifest, Config objects, Direct Services, ordinary Service
 references, or client-owned Runtime Services disposable projections.
+
+Management route selection is resolved once per request against the complete
+operation contract. A node must never route reads to lifecycle rows while
+routing writes to the historical implementation, or expose any other
+mixed-authority combination.
 
 The following changes are explicitly outside this migration:
 
@@ -313,6 +318,16 @@ remain compatible and map to the lifecycle application service:
 The same-Version overwrite is an audited compatibility exception. Standard
 lifecycle APIs must never reuse it.
 
+A compatibility overwrite with `isPublish=false` must retain the current
+Version lifecycle status, Manifest presentation, latest pointer, and existing
+release metadata. The overwritten Version content becomes the published
+presentation only after a later explicit publish.
+
+A compatibility direct-online create may temporarily use the Resource
+`editingVersion` pointer as its in-flight retry marker. It clears that pointer
+only after the Manifest is reread and verified. A completed or intentionally
+offline Resource has no such marker and remains a duplicate create conflict.
+
 ### 6.3 Draft And Publish Ordering
 
 A draft write uses this order:
@@ -333,44 +348,53 @@ Publish or online uses this order:
 5. publish the Manifest last through MCP Serving Manifest Storage; and
 6. reread and verify the serving view before returning success.
 
-If Manifest publication or verification fails, the operation reports failure
-and records durable repair state. Retries are idempotent. Search indexing is
-scheduled only after the business mutation and never determines publish
-success.
+The online lifecycle row is the durable desired state. If Manifest publication
+or verification fails, the operation reports failure while preserving that row;
+an idempotent retry or managed reconciler rebuilds the missing serving
+projection. Search indexing is scheduled only after the business mutation and
+never determines publish success.
 
 ### 6.4 Offline And Delete
 
-Offline first removes the Version from the Manifest serving view and verifies
-that change, then converges the Version to `offline`. It retains
-Server/Tools/Resources content and the Direct persistent Service.
+Offline first converges the Version to the durable `offline` lifecycle state,
+then rebuilds and verifies the Manifest serving view without that Version. It
+does not implicitly disable the Resource, and retains Server/Tools/Resources
+content and the Direct persistent Service. If Manifest convergence fails, the
+operation reports failure while the retained offline row gives retry and
+reconciliation an unambiguous target.
 
 Version deletion:
 
-1. removes and verifies the Version's Manifest exposure;
-2. invokes the MCP-specific cleanup hook for Direct state owned by that
+1. loads and retains the Version storage descriptor;
+2. converges the Version to `offline`, repairs labels, and removes and verifies
+   its Manifest exposure;
+3. invokes the MCP-specific cleanup hook for Direct state owned by that
    Version;
-3. deletes Server/Tools/Resources through MCP Version Storage;
-4. deletes the Version row only after all physical cleanup succeeds; and
-5. repairs labels and schedules asynchronous Search maintenance.
+4. deletes Server/Tools/Resources through MCP Version Storage;
+5. deletes the Version row only after all physical cleanup succeeds; and
+6. schedules asynchronous Search maintenance.
 
 Full Resource deletion:
 
 1. resolves and authorizes the canonical Resource by name or a deprecated
-   compatible ID;
-2. deletes the serving Manifest first so gateways stop discovering it;
-3. calls the common Resource-with-Versions deletion flow with the MCP storage
+   compatible ID and loads every Version descriptor;
+2. disables the Resource and converges its Versions to `offline` so lifecycle
+   rows durably express the non-serving target;
+3. deletes and verifies the serving Manifest so gateways stop discovering it;
+4. calls the common Resource-with-Versions deletion flow with the MCP storage
    deleter;
-4. for every Version, the deleter validates the descriptor, cleans MCP-owned
+5. for every Version, the deleter validates the descriptor, cleans MCP-owned
    Direct state, and deletes Resources, Tools, and Server content through
    Storage; and
-5. removes Resource and Version rows only after every callback succeeds.
+6. removes Resource and Version rows only after every callback succeeds.
 
-Any endpoint or content cleanup failure reports failure and preserves the
-Resource row, Version rows, and storage descriptors required for retry. An
-ID-only retry still resolves through `AiResource.ext`, so deletion does not
-need a Manifest tombstone. An ordinary REF Service and client-owned Runtime
-instances retain their existing ownership and are not deleted with the MCP
-Version.
+Any Manifest, endpoint, or content cleanup failure reports failure and
+preserves the disabled/offline Resource and Version rows plus storage
+descriptors required for retry. Those lifecycle states are also the durable
+recovery intent, so no separate MCP operation journal or Manifest tombstone is
+required. An ID-only retry still resolves through `AiResource.ext`. An ordinary
+REF Service and client-owned Runtime instances retain their existing ownership
+and are not deleted with the MCP Version.
 
 ## 7. Deprecated `mcpId` Compatibility
 
@@ -446,8 +470,11 @@ content = {"schemaVersion":1,"state":"LIFECYCLE_MANAGED","completedAt":<epochMil
 
 The permanent marker means management rows are completely hosted. It does not
 authorize deletion or mutation of serving Config or Naming data. A renewable
-cluster lease may use a separate internal Config key. Losing the lease stops
-the current writer without deleting MCP content.
+cluster lease uses `nacos.ai.mcp.resource.reconciliation.lease.v1`. While the
+system is still synchronizing, the task may persist non-authoritative
+diagnostics at `nacos.ai.mcp.resource.reconciliation.progress.v1` with
+`state=SYNCING`. Neither object is the completion marker. Losing the lease
+stops the current writer without deleting MCP content.
 
 ### 8.2 Reconciliation
 
@@ -466,14 +493,22 @@ After the root `ApplicationReadyEvent`, a background task:
    `mcpName`;
 7. detects missing content, conflicting identity, duplicate source rows,
    invalid Versions, and pending deletion;
-8. reconciles removed `legacy-mcp` rows without deleting independently
-   created resources;
+8. routes removed `legacy-mcp` rows through the common lifecycle
+   delete/recovery flow without deleting independently created resources;
 9. completes a zero-difference validation round; and
 10. writes the completion marker only after every known cluster member supports
     managed writes and write-after-reconcile hooks.
 
-Reconciliation creates pointers only. It never saves or rewrites historical
-payloads and never mutates Naming.
+The Version/Resource upsert phase creates pointers only. It never saves or
+rewrites historical payloads and never mutates Naming. Until the canonical
+name Search projector and the common lifecycle delete/recovery handlers are
+available on every member, a `SYNCING` reconciler records Search backfill,
+extra Version, and orphaned `legacy-mcp` work as blocking diagnostics. It must
+not enqueue an ID-keyed Search task or directly delete Resource/Version rows,
+payload Config, or Naming state. Such a partial synchronization can never
+write the completion marker. Before the name-keyed projector is introduced,
+the progress record keeps `searchBackfillPending=true` and
+`managedCutoverReady=false` even when lifecycle rows have zero difference.
 
 ### 8.3 Writes During `SYNCING`
 
@@ -483,6 +518,16 @@ node performs the current physical compatibility write through MCP Storage and
 then invokes the same per-Resource reconciler. Periodic scanning repairs writes
 from an older node. New lifecycle write APIs do not become available before
 managed cutover. A mixed-version cluster remains `SYNCING`.
+
+Lifecycle reconciliation is a secondary convergence step in this state. Its
+failure is diagnosed and repaired by periodic scanning, but does not reinterpret
+or roll back an already successful authoritative historical write.
+
+The compatibility facade routes the complete read/write operation contract to
+the historical implementation in this state. The permanent marker may switch
+that complete contract to the lifecycle implementation only after every
+managed operation and its recovery path are available; it never switches
+individual methods independently.
 
 Cutover requires:
 
@@ -513,11 +558,17 @@ MCP participates in generic AI Resource Search and the MCP-specific Search
 facade through one shared index and Query Planner. Canonical Search
 `resourceName` is `mcpName`, never `mcpId`.
 
-The MCP Search projector loads the visible Resource, online Version, and
-content through the persisted storage descriptor. It does not query the
-historical MCP operation service by ID. It may project public description,
-Tools, Resources, tags, protocols, and capabilities. Credentials, runtime
-instances, and sensitive authentication metadata never enter Search chunks.
+The MCP Search projector follows the same complete compatibility operation
+router as management traffic. While `SYNCING`, it projects the complete
+historical view through MCP Storage by canonical name so partially reconciled
+Resource rows cannot hide MCP Servers. After `LIFECYCLE_MANAGED`, that same
+router loads the visible Resource, online Version, and content through the
+persisted storage descriptor. The projector input and Search identity never use
+`mcpId`; the `SYNCING` strategy may still resolve the internal compatibility
+alias needed to read the unchanged Manifest and Config coordinates. It may
+project public description, Tools, Resources, tags, protocols, and capabilities.
+Credentials, runtime instances, and sensitive authentication metadata never
+enter Search chunks.
 
 Every successful create, update, publish, online, offline, delete,
 enable/disable, label, or import mutation schedules a durable asynchronous
