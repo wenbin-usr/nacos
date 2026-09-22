@@ -17,6 +17,8 @@
 package com.alibaba.nacos.ai.service.mcp;
 
 import com.alibaba.nacos.api.ai.model.mcp.McpEndpointSpec;
+import com.alibaba.nacos.api.ai.model.mcp.McpServerVersionDetail;
+import com.alibaba.nacos.api.ai.model.mcp.McpServerVersionSummary;
 import com.alibaba.nacos.api.ai.model.mcp.McpResourceSpecification;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerBasicInfo;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerDetailInfo;
@@ -28,6 +30,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -76,6 +80,8 @@ class McpCompatibilityOperationServiceTest {
             .thenReturn(page);
         when(legacyService.getMcpServerDetail(NAMESPACE_ID, MCP_ID, MCP_NAME, "1.0.0"))
             .thenReturn(detail);
+        when(legacyService.getMcpServerDetail(NAMESPACE_ID, null, MCP_NAME, "1.0.0"))
+            .thenReturn(detail);
         when(legacyService.createMcpServer(NAMESPACE_ID, server, tools, resources, endpoint))
             .thenReturn(MCP_ID);
         
@@ -83,6 +89,8 @@ class McpCompatibilityOperationServiceTest {
             service.listMcpServerWithPage(NAMESPACE_ID, MCP_NAME, "accurate", 1, 10));
         assertEquals(detail,
             service.getMcpServerDetail(NAMESPACE_ID, MCP_ID, MCP_NAME, "1.0.0"));
+        assertEquals(detail,
+            service.getServingMcpServerDetail(NAMESPACE_ID, MCP_NAME, "1.0.0"));
         assertEquals(MCP_ID,
             service.createMcpServer(NAMESPACE_ID, server, tools, resources, endpoint));
         service.updateMcpServer(NAMESPACE_ID, true, server, tools, resources, endpoint, false);
@@ -107,12 +115,16 @@ class McpCompatibilityOperationServiceTest {
             .thenReturn(page);
         when(lifecycleService.getMcpServerDetail(NAMESPACE_ID, MCP_ID, MCP_NAME, null))
             .thenReturn(detail);
+        when(lifecycleService.getServingMcpServerDetail(NAMESPACE_ID, MCP_NAME, null))
+            .thenReturn(detail);
         when(lifecycleService.createMcpServer(NAMESPACE_ID, server, tools, resources, endpoint))
             .thenReturn(MCP_ID);
         
         assertEquals(page, service.listMcpServerWithPage(NAMESPACE_ID, MCP_NAME, "blur", 2, 20));
         assertEquals(detail,
             service.getMcpServerDetail(NAMESPACE_ID, MCP_ID, MCP_NAME, null));
+        assertEquals(detail,
+            service.getServingMcpServerDetail(NAMESPACE_ID, MCP_NAME, null));
         assertEquals(MCP_ID,
             service.createMcpServer(NAMESPACE_ID, server, tools, resources, endpoint));
         service.updateMcpServer(NAMESPACE_ID, false, server, tools, resources, endpoint, true);
@@ -149,6 +161,98 @@ class McpCompatibilityOperationServiceTest {
         
         assertThrows(NacosApiException.class,
             () -> service.getMcpServerDetail(NAMESPACE_ID, null, MCP_NAME, null));
+        assertThrows(NacosApiException.class,
+            () -> service.getServingMcpServerDetail(NAMESPACE_ID, MCP_NAME, null));
+        verifyNoInteractions(legacyService, lifecycleService);
+    }
+    
+    @Test
+    void testRoutesStandardLifecycleContractOnlyAfterManagedCutover() throws Exception {
+        when(modeResolver.resolve()).thenReturn(McpCompatibilityMode.LIFECYCLE_MANAGED);
+        McpServerBasicInfo server = new McpServerBasicInfo();
+        McpToolSpecification tools = new McpToolSpecification();
+        McpResourceSpecification resources = new McpResourceSpecification();
+        McpEndpointSpec endpoint = new McpEndpointSpec();
+        Page<McpServerVersionSummary> page = new Page<>();
+        McpServerVersionDetail detail = new McpServerVersionDetail();
+        McpServerVersionSummary summary = new McpServerVersionSummary();
+        Map<String, String> labels = Map.of("stable", "1.0.0");
+        when(lifecycleService.listMcpServerVersions(NAMESPACE_ID, MCP_NAME, "draft", 1, 10))
+            .thenReturn(page);
+        when(lifecycleService.getMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"))
+            .thenReturn(detail);
+        when(lifecycleService.createMcpServerDraft(NAMESPACE_ID, server, tools, resources,
+            endpoint)).thenReturn(detail);
+        when(lifecycleService.updateMcpServerDraft(NAMESPACE_ID, server, tools, resources,
+            endpoint)).thenReturn(detail);
+        when(lifecycleService.submitMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"))
+            .thenReturn(summary);
+        when(lifecycleService.publishMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"))
+            .thenReturn(summary);
+        when(lifecycleService.forcePublishMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"))
+            .thenReturn(summary);
+        when(lifecycleService.redraftMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"))
+            .thenReturn(summary);
+        when(lifecycleService.onlineLifecycleVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"))
+            .thenReturn(summary);
+        when(lifecycleService.offlineLifecycleVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"))
+            .thenReturn(summary);
+        when(lifecycleService.updateMcpServerLabels(NAMESPACE_ID, MCP_NAME, labels))
+            .thenReturn(labels);
+        
+        assertEquals(page,
+            service.listMcpServerVersions(NAMESPACE_ID, MCP_NAME, "draft", 1, 10));
+        assertEquals(detail,
+            service.getMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"));
+        assertEquals(detail,
+            service.createMcpServerDraft(NAMESPACE_ID, server, tools, resources, endpoint));
+        assertEquals(detail,
+            service.updateMcpServerDraft(NAMESPACE_ID, server, tools, resources, endpoint));
+        service.deleteMcpServerDraft(NAMESPACE_ID, MCP_NAME, "1.0.0");
+        assertEquals(summary,
+            service.submitMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"));
+        assertEquals(summary,
+            service.publishMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"));
+        assertEquals(summary,
+            service.forcePublishMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"));
+        assertEquals(summary,
+            service.redraftMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"));
+        assertEquals(summary,
+            service.onlineMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"));
+        assertEquals(summary,
+            service.offlineMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"));
+        assertEquals(labels, service.updateMcpServerLabels(NAMESPACE_ID, MCP_NAME, labels));
+        service.updateMcpServerStatus(NAMESPACE_ID, MCP_NAME, false);
+        service.updateMcpServerScope(NAMESPACE_ID, MCP_NAME, "PRIVATE");
+        
+        verify(lifecycleService).deleteMcpServerDraft(NAMESPACE_ID, MCP_NAME, "1.0.0");
+        verify(lifecycleService).updateMcpServerStatus(NAMESPACE_ID, MCP_NAME, false);
+        verify(lifecycleService).updateMcpServerScope(NAMESPACE_ID, MCP_NAME, "PRIVATE");
+        verifyNoInteractions(legacyService);
+    }
+    
+    @Test
+    void testRejectsStandardLifecycleContractBeforeManagedCutover() {
+        when(modeResolver.resolve()).thenReturn(McpCompatibilityMode.SYNCING);
+        
+        assertThrows(NacosApiException.class,
+            () -> service.getMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"));
+        assertThrows(NacosApiException.class,
+            () -> service.updateMcpServerStatus(NAMESPACE_ID, MCP_NAME, false));
+        assertThrows(NacosApiException.class,
+            () -> service.updateMcpServerScope(NAMESPACE_ID, MCP_NAME, "PRIVATE"));
+        
+        verifyNoInteractions(legacyService, lifecycleService);
+    }
+    
+    @Test
+    void testRejectsStandardLifecycleContractOnMemberWithoutCapability() {
+        when(modeResolver.resolve()).thenReturn(McpCompatibilityMode.LIFECYCLE_MANAGED);
+        when(modeResolver.localMemberSupportsManagedLifecycle()).thenReturn(false);
+        
+        assertThrows(NacosApiException.class,
+            () -> service.getMcpServerVersion(NAMESPACE_ID, MCP_NAME, "1.0.0"));
+        
         verifyNoInteractions(legacyService, lifecycleService);
     }
     

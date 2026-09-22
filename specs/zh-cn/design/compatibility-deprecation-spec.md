@@ -120,6 +120,28 @@ Schema 清理应平衡正确性和运维成本。冗余字段可以为了避免�
 以及 Config beta/tag 旧表向 `config_info_gray` 的迁移，视为已移除兼容行为。从 3.0 之前版本
 升级时，如果使用过默认 namespace 或 beta 灰度发布，运维侧必须先完成相关数据迁移再升级。
 
+### 8.1 Nacos 3.3 Client API 鉴权默认值
+
+Nacos 3.3 将 Client API 鉴权从默认关闭改为默认开启。这是默认值变更，不是 API 废弃或移除。
+兼容规则如下：
+
+| 部署状态 | Client 鉴权有效行为 |
+| --- | --- |
+| 显式存在 `nacos.core.auth.enabled=false` | 继续关闭。 |
+| 显式存在 `nacos.core.auth.enabled=true` | 继续开启。 |
+| 属性缺失 | 使用 Nacos 3.3 默认值并开启。 |
+| 使用新的发行包配置模板 | 由模板开启。 |
+| 继续使用包含 `false` 的旧手工配置文件 | 继续关闭。 |
+| Docker 或 Kubernetes 鉴权环境变量缺失 | 使用镜像/模板默认值并开启。 |
+| Docker 或 Kubernetes 鉴权环境变量显式设置 | 显式 `true` 或 `false` 优先。 |
+
+应用尚未携带身份的升级场景，应先显式保持 Client 开关关闭，分发凭据并确认 Client 可以登录，再把可运行
+时刷新的开关应用到每个服务端成员。一个集群内有效值不一致不是受支持的最终发布状态。Release note 和
+升级文档必须明确新的默认值、凭据前置条件和显式关闭迁移路径。
+
+现有开关就是兼容机制。本次变更不增加第二个 legacy auth 开关，不强制重写已有配置文件，也不改变相互
+独立的 Admin 或 Console 鉴权默认值。
+
 ## 9. 废弃 V3 API 门禁
 
 以下少量待移除的废弃 v3 API 默认关闭：
@@ -174,7 +196,11 @@ nacos.core.api.compatibility.enabled=true
 - Console `/v3/console/ai/a2a` 兼容到 3.4.x 窗口，内置 UI 完成迁移后可以移除。
 
 不得只向这些 facade 增加新能力。新增开发以 Agent Management 和 RAD 契约为目标。
-历史数据与混合 Server 滚动升级使用独立迁移方案，本身不延长 API 兼容窗口。
+历史数据与混合 Server 滚动升级遵循
+[历史 A2A 升级迁移规范](../ai/a2a-upgrade-migration-spec.md)，本身不延长 API 兼容窗口。其对账状态、
+控制对象、迁移来源写保护、过渡期 Runtime 双物化、可选历史 Naming Shadow 和迁移专用配置只用于
+Nacos 3.0～3.2 升级，计划在 Nacos 4.0 删除。删除这些临时实现后，标准 Agent/RAD 事实和仍处于
+自身兼容窗口内的公开 A2A Facade 继续保留。
 
 ## 12. 旧 MCP 标识符
 
@@ -194,6 +220,21 @@ nacos.core.api.compatibility.enabled=true
 该已废弃路径不新增表或字段。移除它需要为 Config 坐标、直读消费者、SDK Model 和 Wire Response
 制定独立迁移；首期生命周期托管不定义移除版本。精确行为由
 [MCP Server 规范](../ai/mcp-server-spec.md)定义。
+
+### 12.1 旧 MCP Maintainer 方法
+
+`McpMaintainerService` 的旧 Detail 和 Direct-online Create/Update 方法自 Nacos 3.3.0
+起废弃，计划在 Nacos 4.0.0 删除。在兼容窗口内，其运行时行为继续保持兼容。调用方应按下表迁移：
+
+| 已废弃操作 | 标准替代方式 |
+| --- | --- |
+| Serving 投影详情 | 先通过 `listMcpServerVersions` 选择精确 Version，再使用 `getMcpServerVersion`。 |
+| Local、Remote 或通用 Direct-online Create | 使用 `createMcpServer(McpServerDraftRequest)`，随后调用 `submitMcpServerVersion`；启用审核时，在审核通过后显式调用 `publishMcpServerVersion`。 |
+| Direct-online Update | 新 Version 使用 `createMcpServer(McpServerDraftRequest)`，已有 Draft 使用 `updateMcpServer(McpServerDraftRequest)`，随后 Submit，并在需要时 Publish。 |
+
+旧的跨 Resource List/Search，以及 Published Version 或完整 Resource Delete 方法不在本次废弃
+范围内，因为 Typed Lifecycle 接口尚未提供语义等价的替代方法。它们必须在补齐独立 API 设计并完成
+废弃评审后，才能设定删除版本。
 
 ## 13. 相关规范
 

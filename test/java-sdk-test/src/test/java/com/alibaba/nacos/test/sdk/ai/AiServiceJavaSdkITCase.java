@@ -40,6 +40,7 @@ import com.alibaba.nacos.api.ai.model.mcp.McpResourceSpecification;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerBasicInfo;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerDetailInfo;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerRemoteServiceConfig;
+import com.alibaba.nacos.api.ai.model.mcp.McpServerVersionDetail;
 import com.alibaba.nacos.api.ai.model.mcp.McpTool;
 import com.alibaba.nacos.api.ai.model.mcp.McpToolSpecification;
 import com.alibaba.nacos.api.ai.model.mcp.registry.ServerVersionDetail;
@@ -48,6 +49,7 @@ import com.alibaba.nacos.api.common.Constants;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.maintainer.client.ai.AgentMaintainerService;
 import com.alibaba.nacos.maintainer.client.ai.AiMaintainerFactory;
+import com.alibaba.nacos.maintainer.client.ai.McpMaintainerService;
 import com.alibaba.nacos.test.sdk.JavaSdkBaseITCase;
 import org.junit.jupiter.api.Test;
 
@@ -109,6 +111,26 @@ public class AiServiceJavaSdkITCase extends JavaSdkBaseITCase {
     private static final String MCP_ENDPOINT_SPEC_TRANSPORT_PROTOCOL = "transportProtocol";
 
     @Test
+    public void testResourceAccessorsReuseServicesAndValidateThroughBothEntrypoints() throws Exception {
+        AiService service = createAiService();
+        org.junit.jupiter.api.Assertions.assertSame(service.mcp(), service.mcp());
+        org.junit.jupiter.api.Assertions.assertSame(service.agent(), service.agent());
+        org.junit.jupiter.api.Assertions.assertSame(service.skill(), service.skill());
+        org.junit.jupiter.api.Assertions.assertSame(service.agentSpec(), service.agentSpec());
+        org.junit.jupiter.api.Assertions.assertSame(service.prompt(), service.prompt());
+        assertEquals(assertThrows(NacosException.class, () -> service.getMcpServer("")).getErrCode(),
+                assertThrows(NacosException.class, () -> service.mcp().getMcpServer("")).getErrCode());
+        assertEquals(assertThrows(NacosException.class, () -> service.getAgentCard("")).getErrCode(),
+                assertThrows(NacosException.class, () -> service.agent().getAgentCard("")).getErrCode());
+        assertEquals(assertThrows(NacosException.class, () -> service.downloadSkillZip("")).getErrCode(),
+                assertThrows(NacosException.class, () -> service.skill().downloadSkillZip("")).getErrCode());
+        assertEquals(assertThrows(NacosException.class, () -> service.loadAgentSpec("")).getErrCode(),
+                assertThrows(NacosException.class, () -> service.agentSpec().loadAgentSpec("")).getErrCode());
+        assertEquals(assertThrows(NacosException.class, () -> service.getPrompt("")).getErrCode(),
+                assertThrows(NacosException.class, () -> service.prompt().getPrompt("")).getErrCode());
+    }
+
+    @Test
     public void testReleaseQueryAndSubscribeMcpServer() throws Exception {
         AiService aiService = createAiService();
         ConfigService configService = createConfigService();
@@ -119,7 +141,7 @@ public class AiServiceJavaSdkITCase extends JavaSdkBaseITCase {
                 buildMcpToolSpecification(mcpName), buildMcpResourceSpecification(mcpName));
         addCleanup(() -> cleanupMcpServer(configService, mcpId, version));
 
-        McpServerDetailInfo detail = aiService.getMcpServer(mcpName, version);
+        McpServerDetailInfo detail = aiService.mcp().getMcpServer(mcpName, version);
         assertEquals(mcpId, detail.getId(), detail.toString());
         assertEquals(mcpName, detail.getName(), detail.toString());
         assertEquals(version, detail.getVersionDetail().getVersion(), detail.toString());
@@ -133,7 +155,7 @@ public class AiServiceJavaSdkITCase extends JavaSdkBaseITCase {
                 callback.set(event.getMcpServerDetailInfo());
             }
         };
-        addCleanup(() -> aiService.unsubscribeMcpServer(mcpName, version, listener));
+        addCleanup(() -> aiService.mcp().unsubscribeMcpServer(mcpName, version, listener));
         McpServerDetailInfo subscribed = aiService.subscribeMcpServer(mcpName, version, listener);
         assertEquals(mcpId, subscribed.getId(), subscribed.toString());
         waitUntil("subscribe should invoke listener with current MCP detail",
@@ -205,6 +227,35 @@ public class AiServiceJavaSdkITCase extends JavaSdkBaseITCase {
                 detail.toString());
         assertTrue(containsMcpEndpoint(detail, publishedPort, exportPath,
                 AiConstants.Mcp.MCP_PROTOCOL_SSE), detail.toString());
+    }
+
+    @Test
+    public void testMcpReleaseDraftChoiceOverGrpc() throws Exception {
+        AiService aiService = createAiService();
+        McpMaintainerService maintainer = createMcpMaintainerService();
+        String onlineName = randomServiceName("mcp-grpc-explicit-false");
+
+        String onlineId = aiService.releaseMcpServer(buildMcpServer(onlineName, "1.0.0"),
+                buildMcpToolSpecification(onlineName), buildMcpResourceSpecification(onlineName),
+                null, false);
+        assertNotNull(onlineId);
+        addCleanup(() -> maintainer.deleteMcpServer(Constants.DEFAULT_NAMESPACE_ID, onlineName,
+                null, null));
+        assertEquals("1.0.0",
+                aiService.getMcpServer(onlineName).getVersionDetail().getVersion());
+
+        String draftName = randomServiceName("mcp-grpc-draft");
+        String draftId = aiService.releaseMcpServer(buildMcpServer(draftName, "1.0.0"),
+                buildMcpToolSpecification(draftName), buildMcpResourceSpecification(draftName),
+                null, true);
+        assertNotNull(draftId);
+        addCleanup(() -> maintainer.deleteMcpServer(Constants.DEFAULT_NAMESPACE_ID, draftName,
+                null, null));
+        McpServerVersionDetail draft = maintainer.getMcpServerVersion(draftName, "1.0.0");
+        assertEquals("draft", draft.getStatus(), draft.toString());
+        NacosException notServing = assertThrows(NacosException.class,
+                () -> aiService.getMcpServer(draftName, "1.0.0"));
+        assertEquals(NacosException.NOT_FOUND, notServing.getErrCode(), notServing.toString());
     }
 
     @Test
@@ -286,13 +337,13 @@ public class AiServiceJavaSdkITCase extends JavaSdkBaseITCase {
                 AiConstants.A2a.A2A_ENDPOINT_TYPE_URL, true);
         addCleanup(() -> maintainer.deleteAgent(Constants.DEFAULT_NAMESPACE_ID, agentName));
 
-        AgentCardDetailInfo detail = aiService.getAgentCard(agentName, version,
+        AgentCardDetailInfo detail = aiService.agent().getAgentCard(agentName, version,
                 AiConstants.A2a.A2A_ENDPOINT_TYPE_URL);
         assertEquals(agentName, detail.getName(), detail.toString());
         assertEquals(version, detail.getVersion(), detail.toString());
         assertEquals(AiConstants.A2a.A2A_ENDPOINT_TYPE_URL, detail.getRegistrationType(),
                 detail.toString());
-        assertTrue(detail.isLatestVersion(), detail.toString());
+        assertNull(detail.isLatestVersion(), detail.toString());
 
         AtomicReference<AgentCardDetailInfo> callback = new AtomicReference<>();
         AbstractNacosAgentCardListener listener = new AbstractNacosAgentCardListener() {
@@ -328,7 +379,7 @@ public class AiServiceJavaSdkITCase extends JavaSdkBaseITCase {
         assertEquals(agentName, detail.getName(), detail.toString());
         assertEquals(version, detail.getVersion(), detail.toString());
         assertEquals("Java SDK IT agent", detail.getDescription(), detail.toString());
-        assertTrue(detail.isLatestVersion(), detail.toString());
+        assertNull(detail.isLatestVersion(), detail.toString());
     }
 
     @Test
@@ -346,8 +397,12 @@ public class AiServiceJavaSdkITCase extends JavaSdkBaseITCase {
         aiService.releaseAgentCard(buildAgentCard(agentName, secondVersion),
                 AiConstants.A2a.A2A_ENDPOINT_TYPE_URL, false);
         assertEquals(firstVersion, aiService.getAgentCard(agentName).getVersion());
-        assertEquals(secondVersion, aiService.getAgentCard(agentName, secondVersion).getVersion());
+        assertEquals("draft", maintainer.getAgentVersion(agentName, secondVersion).getStatus());
+        assertThrows(NacosException.class, () -> aiService.getAgentCard(agentName, secondVersion));
 
+        aiService.releaseAgentCard(buildAgentCard(agentName, secondVersion),
+                AiConstants.A2a.A2A_ENDPOINT_TYPE_URL, true);
+        assertEquals(secondVersion, aiService.getAgentCard(agentName).getVersion());
         aiService.releaseAgentCard(buildAgentCard(agentName, thirdVersion),
                 AiConstants.A2a.A2A_ENDPOINT_TYPE_URL, true);
         assertEquals(thirdVersion, aiService.getAgentCard(agentName).getVersion());
@@ -513,11 +568,9 @@ public class AiServiceJavaSdkITCase extends JavaSdkBaseITCase {
 
         assertNull(aiService.subscribeAgentCard(agentName, agentCardListener));
         assertNull(aiService.subscribePrompt(promptKey, null, null, promptListener));
-        assertServerNotImplemented(
-                () -> aiService.subscribeSkill(skillName, null, null, skillListener));
-        assertServerNotImplemented(() -> aiService.loadAgentSpec(agentSpecName));
-        assertServerNotImplemented(() -> aiService.subscribeAgentSpec(agentSpecName,
-                agentSpecListener));
+        assertNull(aiService.subscribeSkill(skillName, null, null, skillListener));
+        assertNull(aiService.loadAgentSpec(agentSpecName));
+        assertNull(aiService.subscribeAgentSpec(agentSpecName, agentSpecListener));
         assertThrows(NacosException.class, () -> aiService.downloadSkillZip(skillName));
     }
 
@@ -560,11 +613,7 @@ public class AiServiceJavaSdkITCase extends JavaSdkBaseITCase {
         assertEquals(NacosException.INVALID_PARAM, exception.getErrCode(), exception.toString());
     }
 
-    private void assertServerNotImplemented(CheckedRunnable runnable) {
-        NacosException exception = assertThrows(NacosException.class, runnable::run);
-        assertEquals(NacosException.SERVER_NOT_IMPLEMENTED, exception.getErrCode(),
-                exception.toString());
-    }
+
 
     private McpServerBasicInfo buildMcpServer(String mcpName, String version) {
         McpServerBasicInfo result = new McpServerBasicInfo();
@@ -717,9 +766,15 @@ public class AiServiceJavaSdkITCase extends JavaSdkBaseITCase {
     }
 
     private AgentMaintainerService createAgentMaintainerService() throws NacosException {
-        Properties properties = sdkProperties();
+        Properties properties = maintainerProperties();
         properties.setProperty(PropertyKeyConst.CONTEXT_PATH, "/nacos");
         return AiMaintainerFactory.createAiMaintainerService(properties).agent();
+    }
+
+    private McpMaintainerService createMcpMaintainerService() throws NacosException {
+        Properties properties = maintainerProperties();
+        properties.setProperty(PropertyKeyConst.CONTEXT_PATH, "/nacos");
+        return AiMaintainerFactory.createAiMaintainerService(properties).mcp();
     }
 
     private void cleanupMcpServer(ConfigService configService, String mcpId, String version)

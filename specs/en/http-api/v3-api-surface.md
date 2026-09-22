@@ -75,15 +75,15 @@ guide, not as a final OpenAPI export.
 | `/v3/client/ai/prompt` | 2 | GET | Runtime prompt query and Search. |
 | `/v3/client/ai/skills` | 2 | GET | Runtime skill zip download and Search. |
 | `/v3/client/ai/agentspecs` | 2 | GET | Runtime AgentSpec get and search. |
-| `/v3/client/ai/mcp` | 1 | GET | Runtime MCP Search. |
+| `/v3/client/ai/mcp` | 6 | GET, POST, PUT, DELETE | MCP Search, serving query, compatibility release, Runtime Endpoint publication, and heartbeat. |
 | `/v3/admin/core/*` | 25 | GET, POST, PUT, DELETE | Loader, cluster, ops, namespace, state, plugin. |
 | `/v3/admin/cs/*` | 25 | GET, POST, PUT, DELETE | Config CRUD, history, listener, capacity, metrics, ops. |
 | `/v3/admin/ns/*` | 29 | GET, POST, PUT, DELETE | Service, instance, client, cluster, health, ops. |
-| `/v3/admin/ai/*` | 89 | GET, POST, PUT, DELETE | MCP, A2A, Agent, Prompt, Skill, AgentSpec, Pipeline. |
+| `/v3/admin/ai/*` | 104 | GET, POST, PUT, DELETE | MCP, A2A, Agent, Prompt, Skill, AgentSpec, Pipeline. |
 | `/v3/console/core/*` | 7 | GET, POST, PUT, DELETE | Cluster and namespace console operations. |
 | `/v3/console/cs/*` | 17 | GET, POST, DELETE | Config and history console operations. |
 | `/v3/console/ns/*` | 11 | GET, POST, PUT, DELETE | Naming console service and instance operations. |
-| `/v3/console/ai/*` | 67 | GET, POST, PUT, DELETE | Console AI management, imports, lifecycle, pipelines. |
+| `/v3/console/ai/*` | 82 | GET, POST, PUT, DELETE | Console AI management, imports, lifecycle, pipelines. |
 | `/v3/console/copilot/*` | 6 | GET, POST | Config plus SSE copilot operations. |
 | `/v3/auth/user` | 7 | GET, POST, PUT, DELETE | User login and management in default auth plugin. |
 | `/v3/auth/role` | 4 | GET, POST, DELETE | Role management in default auth plugin. |
@@ -243,6 +243,7 @@ management contract.
 | `/online` | POST | Bring an offline Version online. |
 | `/offline` | POST | Take an online Version offline. |
 | `/labels` | PUT | Update custom Version labels. |
+| `/scope` | PUT | Change Agent Resource visibility between `PUBLIC` and `PRIVATE`, preserving Version and Runtime state. |
 
 The target does not add Client HTTP Watch or Endpoint-list GET APIs. Watch and
 push use the negotiated gRPC binding; runtime inspection uses the Admin or
@@ -250,10 +251,11 @@ Console `/runtime-endpoints` path.
 
 ## 9. Approved MCP Lifecycle Surface
 
-The following paths are the Experimental target management surface from the
-[MCP Server Spec](../ai/mcp-server-spec.md). They are not part of the current
-implemented inventory until their controllers, forms, authorization, domain
-services, and integration tests are present.
+The following paths are the Experimental management surface implemented from
+the [MCP Server Spec](../ai/mcp-server-spec.md). They are available only after
+the one-way MCP management authority reaches `LIFECYCLE_MANAGED`; before that
+cutover, a valid request fails with `RESOURCE_CONFLICT` and does not mutate
+legacy MCP state.
 
 Admin uses `/v3/admin/ai/mcp`; Console uses `/v3/console/ai/mcp` as a UI facade
 over the same relative lifecycle contract:
@@ -270,6 +272,30 @@ over the same relative lifecycle contract:
 | `/online` | POST | Bring an offline Version online and make it latest. |
 | `/offline` | POST | Take an online Version offline and repair latest when needed. |
 | `/labels` | PUT | Update custom labels while ignoring a client-provided `latest`. |
+| `/status` | PUT | Enable or disable the MCP Resource without changing Version states. |
+| `/scope` | PUT | Change the MCP Resource visibility between `PUBLIC` and `PRIVATE`. |
+
+All routes use form/query parameters. The common identity fields are
+`namespaceId` (optional, default `public`), required `mcpName`, and, except for
+`/versions`, `/labels`, `/status`, and `/scope`, required exact `version`. `/versions` additionally
+accepts optional `status` plus bounded `pageNo` and `pageSize`.
+
+`POST` and `PUT /draft` additionally accept required JSON
+`serverSpecification` and optional JSON `toolSpecification`,
+`resourceSpecification`, and `endpointSpecification`. The outer `mcpName` and
+`version` are canonical. Repeated name or Version fields in
+`serverSpecification` must match them, and `serverSpecification.id` is
+rejected. `/labels` accepts a JSON string map; blank input clears custom labels
+while preserving server-managed labels. `/status` requires boolean `enabled`;
+`/scope` requires a case-insensitive `PUBLIC` or `PRIVATE` value.
+
+Version list results use `Page<McpServerVersionSummary>`. Exact reads and
+draft writes return `McpServerVersionDetail`, including lifecycle metadata
+and Server/Tools/Resources content without the internal MCP ID. The detail also
+projects the resource status, owner, scope, writable flag, labels, editing/reviewing pointers,
+and online Version count needed by lifecycle-aware management clients. Lifecycle
+commands return the resulting summary, draft deletion returns an empty success
+result, and label replacement returns the effective label map.
 
 Existing MCP create/update/delete paths and parameter shapes remain
 compatibility-only direct-online facades. They are not copied into the new
@@ -284,9 +310,29 @@ through `AiResource.ext`, verifies a simultaneously supplied name, and enters
 the same name-based authorization and lifecycle service. Existing response ID
 fields remain wire-compatible.
 
-This target does not add MCP Client HTTP query, release, endpoint, heartbeat,
-or subscription paths. HTTP parity with the existing gRPC/Java Client surface
-is deferred to a separate design after lifecycle hosting is complete.
+The MCP Client HTTP binding uses `/v3/client/ai/mcp`:
+
+| Method | Path | Contract |
+| --- | --- | --- |
+| GET | `/v3/client/ai/mcp/search` | Existing current MCP Search facade. |
+| GET | `/v3/client/ai/mcp` | Query the latest published or one exact serving Version by `namespaceId + mcpName (+ version)`. |
+| POST | `/v3/client/ai/mcp` | Form release; omitted or false `createDraft` is direct-online, while true creates a lifecycle draft only. |
+| POST | `/v3/client/ai/mcp/endpoints` | Register the current HTTP Client's Runtime Endpoint using a literal IP address and a port in `1..65535`. |
+| DELETE | `/v3/client/ai/mcp/endpoints` | Deregister the current HTTP Client's matching Runtime Endpoint using the same validated identity. |
+| PUT | `/v3/client/ai/mcp/endpoints/heartbeat` | Refresh the shared AI HTTP Client and all of its Publishers. |
+
+All writes use form/query binding. `serverSpecification`, `toolSpecification`,
+`resourceSpecification`, and `endpointSpecification` are JSON string fields,
+not a JSON request body. Stateful Endpoint paths require the stable
+`X-Nacos-Client-Id` and `Request-Module: AI` headers. Query may carry the Client
+id to renew an existing Client only. No new top-level `mcpId` input is added.
+
+In an embedded or standalone Console process, the Console facade delegates to
+the same lifecycle application service as Admin. Console-only remote deployment
+requires the typed Maintainer lifecycle transport planned by the next MCP
+governance stage; until that transport is present, these new Console lifecycle
+routes return `API_FUNCTION_DISABLED` in remote mode rather than falling back
+to a legacy or ID-based write path.
 
 ## 10. Documentation Gap Notes
 

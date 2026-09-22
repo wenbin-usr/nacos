@@ -22,20 +22,24 @@ import com.alibaba.nacos.ai.model.AiResource;
 import com.alibaba.nacos.ai.model.AiResourceVersion;
 import com.alibaba.nacos.ai.model.agent.AgentVersionContent;
 import com.alibaba.nacos.ai.pipeline.PublishPipelineExecutor;
+import com.alibaba.nacos.ai.event.AiResourceChangeOperation;
 import com.alibaba.nacos.ai.service.VisibilityHelper;
+import com.alibaba.nacos.ai.service.a2a.migration.A2aMigrationAgentMutationGuard;
 import com.alibaba.nacos.ai.service.repository.QueryCondition;
 import com.alibaba.nacos.ai.service.resource.AiResourceManager;
+import com.alibaba.nacos.ai.service.resource.AiResourceChangeNotifier;
 import com.alibaba.nacos.ai.service.resource.PublishPipelineInfo;
 import com.alibaba.nacos.ai.service.resource.ResourceVersionInfo;
 import com.alibaba.nacos.ai.service.search.AiResourceIndexMaintenanceService;
 import com.alibaba.nacos.ai.service.agent.storage.AgentVersionContentSerializer;
 import com.alibaba.nacos.ai.service.trace.AiResourceTraceService;
 import com.alibaba.nacos.api.ai.constant.AiConstants;
-import com.alibaba.nacos.api.ai.model.agent.Agent;
-import com.alibaba.nacos.api.ai.model.agent.AgentCallInterface;
-import com.alibaba.nacos.api.ai.model.agent.AgentDraftCreateRequest;
-import com.alibaba.nacos.api.ai.model.agent.AgentOverview;
 import com.alibaba.nacos.api.ai.model.agent.AgentSummary;
+import com.alibaba.nacos.api.ai.model.agent.AgentCallInterface;
+import com.alibaba.nacos.api.ai.model.agent.admin.AgentDraftCreateRequest;
+import com.alibaba.nacos.api.ai.model.agent.client.AgentPublishRequest;
+import com.alibaba.nacos.api.ai.model.agent.base.AbstractAgentDraftRequest;
+import com.alibaba.nacos.api.ai.model.agent.AgentOverview;
 import com.alibaba.nacos.api.ai.model.agent.AgentVersionDetail;
 import com.alibaba.nacos.api.ai.model.agent.AgentVersionSummary;
 import com.alibaba.nacos.api.ai.model.pipeline.PipelineExecutionResult;
@@ -45,7 +49,7 @@ import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.exception.api.NacosApiException;
 import com.alibaba.nacos.api.model.Page;
 import com.alibaba.nacos.api.model.v2.ErrorCode;
-import com.alibaba.nacos.common.utils.JacksonUtils;
+import com.alibaba.nacos.api.utils.json.JsonUtils;
 import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.plugin.ai.pipeline.model.PublishPipelineContext;
 import com.alibaba.nacos.plugin.ai.pipeline.model.PublishPipelineResourceType;
@@ -100,6 +104,12 @@ public class AgentOperationService {
     private AiResourceIndexMaintenanceService resourceIndexMaintenanceService =
         AiResourceIndexMaintenanceService.NOOP;
     
+    private AiResourceChangeNotifier resourceChangeNotifier = AiResourceChangeNotifier.NOOP;
+    
+    // TODO(remove in 4.0): Temporary migration path for Nacos 3.0-3.2 A2A data.
+    // Keep canonical behavior independent from this branch.
+    private A2aMigrationAgentMutationGuard migrationMutationGuard;
+    
     public AgentOperationService(AgentPersistenceService persistenceService,
         AiResourceManager resourceManager, PublishPipelineExecutor publishPipelineExecutor) {
         this.persistenceService = persistenceService;
@@ -115,6 +125,19 @@ public class AgentOperationService {
         }
     }
     
+    @Autowired(required = false)
+    public void setAiResourceChangeNotifier(AiResourceChangeNotifier resourceChangeNotifier) {
+        if (resourceChangeNotifier != null) {
+            this.resourceChangeNotifier = resourceChangeNotifier;
+        }
+    }
+    
+    @Autowired(required = false)
+    public void setA2aMigrationAgentMutationGuard(
+        A2aMigrationAgentMutationGuard migrationMutationGuard) {
+        this.migrationMutationGuard = migrationMutationGuard;
+    }
+    
     /**
      * Read one Agent after applying resource visibility.
      *
@@ -123,7 +146,7 @@ public class AgentOperationService {
      * @return Agent resource
      * @throws NacosException when absent or unreadable
      */
-    public Agent getAgent(String namespaceId, String agentName) throws NacosException {
+    public AgentSummary getAgent(String namespaceId, String agentName) throws NacosException {
         AiResource meta = requireMeta(namespaceId, agentName);
         resourceManager.ensureReadableOrNotFound(meta, "Agent not found: " + agentName);
         return persistenceService.getAgent(namespaceId, agentName);
@@ -153,17 +176,17 @@ public class AgentOperationService {
      * @return updated Agent
      * @throws NacosException when the Agent is absent, not writable, or persistence fails
      */
-    public Agent updateAgent(Agent replacement) throws NacosException {
+    public AgentSummary updateAgent(AgentSummary replacement) throws NacosException {
         if (replacement == null) {
             throw new IllegalArgumentException("Agent replacement must not be null");
         }
         for (int i = 0; i < AiResourceConstants.MAX_WORKING_VERSION_RETRY; i++) {
             AiResource current =
                 requireWritableMeta(replacement.getNamespaceId(), replacement.getAgentName());
-            Agent result = persistenceService.tryUpdateAgent(replacement, current);
+            AgentSummary result = persistenceService.tryUpdateAgent(replacement, current);
             if (result != null) {
                 scheduleAgentIndexMaintenance(replacement.getNamespaceId(),
-                    replacement.getAgentName());
+                    replacement.getAgentName(), AiResourceChangeOperation.UPDATE, false);
                 AiResourceTraceService.logSuccess(RESOURCE_TYPE, replacement.getAgentName(), null,
                     AiResourceTraceService.OP_UPDATE_RESOURCE,
                     VisibilityHelper.resolveCurrentIdentity(), VisibilityHelper.resolveClientIp());
@@ -258,6 +281,92 @@ public class AgentOperationService {
         }
         AgentValidationUtils.validateNamespaceId(namespaceId);
         request.validate();
+        return createValidatedDraft(namespaceId, request);
+    }
+    
+    /**
+     * Apply Client publication rules through the existing draft creation and update paths.
+     *
+     * @param namespaceId namespace
+     * @param request Client publication request
+     * @return definition result and whether no Version existed before creation
+     * @throws NacosException when authorization, validation or the write fails
+     */
+    public PublicationResult writeDraftFromPublication(String namespaceId,
+        AgentPublishRequest request) throws NacosException {
+        if (request == null) {
+            throw new IllegalArgumentException("Agent publish request must not be null");
+        }
+        AgentValidationUtils.validateNamespaceId(namespaceId);
+        request.validate();
+        String agentName = request.getAgentName();
+        AiResource meta = resourceManager.findMeta(namespaceId, agentName, RESOURCE_TYPE);
+        AgentVersionDetail current = null;
+        if (meta != null) {
+            VisibilityHelper.checkWritableResource(meta);
+            checkMigrationMutable(meta);
+            try {
+                current = persistenceService.getAgentVersion(namespaceId, agentName,
+                    request.getVersion());
+            } catch (NacosException e) {
+                if (e.getErrCode() != NacosException.NOT_FOUND) {
+                    throw e;
+                }
+            }
+        }
+        if (current != null
+            && !AiConstants.Agent.VERSION_STATUS_DRAFT.equals(current.getStatus())) {
+            return new PublicationResult(current, false);
+        }
+        AgentVersionDetail draft = toDraft(request);
+        boolean first = false;
+        AgentVersionDetail result;
+        if (current != null) {
+            if (draft.getCallInterfaces() == null) {
+                draft.setCallInterfaces(persistenceService.getAgentVersion(namespaceId, agentName,
+                    request.getBasedOnVersion()).getCallInterfaces());
+            }
+            result = persistenceService.updateDraftFromPublication(namespaceId, agentName, draft);
+        } else if (meta == null) {
+            requireInitialDraftContent(request);
+            first = true;
+            result = persistenceService.createInitialDraftForPublication(
+                toInitialAgent(namespaceId, request), draft);
+        } else {
+            first = persistenceService.listAgentVersions(namespaceId, agentName, null, 1, 1)
+                .getTotalCount() == 0;
+            result = persistenceService.createDraft(namespaceId, agentName, draft,
+                request.getBasedOnVersion(), false);
+        }
+        scheduleAgentIndexMaintenance(namespaceId, agentName,
+            meta == null ? AiResourceChangeOperation.CREATE : AiResourceChangeOperation.UPDATE,
+            true);
+        return new PublicationResult(result, first);
+    }
+    
+    /** Result of a Client draft write, before optional submission. */
+    public static final class PublicationResult {
+        
+        private final AgentVersionDetail version;
+        
+        private final boolean firstVersion;
+        
+        public PublicationResult(AgentVersionDetail version, boolean firstVersion) {
+            this.version = version;
+            this.firstVersion = firstVersion;
+        }
+        
+        public AgentVersionDetail getVersion() {
+            return version;
+        }
+        
+        public boolean isFirstVersion() {
+            return firstVersion;
+        }
+    }
+    
+    private AgentVersionDetail createValidatedDraft(String namespaceId,
+        AbstractAgentDraftRequest request) throws NacosException {
         String agentName = request.getAgentName();
         AgentVersionDetail draft = toDraft(request);
         AiResource meta = resourceManager.findMeta(namespaceId, agentName, RESOURCE_TYPE);
@@ -269,6 +378,7 @@ public class AgentOperationService {
                 draft);
         } else {
             VisibilityHelper.checkWritableResource(meta);
+            checkMigrationMutable(meta);
             if (hasInitialAgentMetadata(request)) {
                 requireInitialDraftContent(request);
                 if (!request.getVersion().equals(
@@ -276,8 +386,10 @@ public class AgentOperationService {
                     throw new IllegalArgumentException(
                         "Agent directory metadata is only allowed when creating the first draft");
                 }
-                result = persistenceService.createInitialDraft(toInitialAgent(namespaceId, request),
-                    draft);
+                AgentSummary initialAgent = toInitialAgent(namespaceId, request);
+                initialAgent.setOwner(meta.getOwner());
+                initialAgent.setScope(meta.getScope());
+                result = persistenceService.createInitialDraft(initialAgent, draft);
             } else {
                 result = persistenceService.createDraft(namespaceId, agentName, draft,
                     request.getBasedOnVersion());
@@ -287,7 +399,8 @@ public class AgentOperationService {
             AiResourceTraceService.OP_CREATE_DRAFT, VisibilityHelper.resolveCurrentIdentity(),
             VisibilityHelper.resolveClientIp());
         if (directoryCreated) {
-            scheduleAgentIndexMaintenance(namespaceId, agentName);
+            scheduleAgentIndexMaintenance(namespaceId, agentName,
+                AiResourceChangeOperation.CREATE, true);
         }
         return result;
     }
@@ -309,12 +422,14 @@ public class AgentOperationService {
             AiResource current = resourceManager.findMeta(namespaceId, agentName, RESOURCE_TYPE);
             if (current != null) {
                 VisibilityHelper.checkWritableResource(current);
+                checkMigrationMutable(current);
                 throw conflict("Agent already exists: " + agentName);
             }
             AgentVersionDetail result = persistenceService.createInitialOnlineVersion(
                 toInitialLegacyAgent(namespaceId, request), toOnlineVersion(request),
                 LEGACY_A2A_RESOURCE_SOURCE);
-            scheduleAgentIndexMaintenance(namespaceId, agentName);
+            scheduleAgentIndexMaintenance(namespaceId, agentName,
+                AiResourceChangeOperation.CREATE, true);
             traceLegacySuccess(agentName, version, OP_LEGACY_A2A_RELEASE, "mode=register");
             return result;
         } catch (Exception e) {
@@ -348,7 +463,8 @@ public class AgentOperationService {
                     AgentVersionDetail result = persistenceService.createInitialOnlineVersion(
                         toInitialLegacyAgent(namespaceId, request), toOnlineVersion(request),
                         LEGACY_A2A_RESOURCE_SOURCE);
-                    scheduleAgentIndexMaintenance(namespaceId, agentName);
+                    scheduleAgentIndexMaintenance(namespaceId, agentName,
+                        AiResourceChangeOperation.CREATE, true);
                     traceLegacySuccess(agentName, version, OP_LEGACY_A2A_RELEASE,
                         "mode=client-create");
                     return result;
@@ -363,9 +479,11 @@ public class AgentOperationService {
                 }
             }
             VisibilityHelper.checkWritableResource(current);
+            checkMigrationMutable(current);
             AgentVersionDetail result = directOnlineExistingAgent(namespaceId, request,
                 setAsLatest, true);
-            scheduleAgentIndexMaintenance(namespaceId, agentName);
+            scheduleAgentIndexMaintenance(namespaceId, agentName,
+                AiResourceChangeOperation.UPDATE, true);
             traceLegacySuccess(agentName, version, OP_LEGACY_A2A_RELEASE,
                 "mode=client-release");
             return result;
@@ -393,7 +511,8 @@ public class AgentOperationService {
             requireWritableMeta(namespaceId, agentName);
             AgentVersionDetail result = directOnlineExistingAgent(namespaceId, request,
                 setAsLatest, false);
-            scheduleAgentIndexMaintenance(namespaceId, agentName);
+            scheduleAgentIndexMaintenance(namespaceId, agentName,
+                AiResourceChangeOperation.UPDATE, true);
             traceLegacySuccess(agentName, version, OP_LEGACY_A2A_RELEASE,
                 "mode=management-update");
             return result;
@@ -423,13 +542,15 @@ public class AgentOperationService {
                 return false;
             }
             VisibilityHelper.checkWritableResource(current);
+            checkMigrationMutable(current);
             AiResourceVersion versionRow =
                 persistenceService.findVersionRow(namespaceId, agentName, version);
             if (versionRow == null) {
                 return false;
             }
             persistenceService.deleteVersion(namespaceId, agentName, version);
-            scheduleAgentIndexMaintenance(namespaceId, agentName);
+            scheduleAgentIndexMaintenance(namespaceId, agentName,
+                AiResourceChangeOperation.UPDATE, true);
             traceLegacySuccess(agentName, version, OP_LEGACY_A2A_DELETE, "mode=version");
             return true;
         } catch (Exception e) {
@@ -456,8 +577,10 @@ public class AgentOperationService {
                 return false;
             }
             VisibilityHelper.checkWritableResource(current);
+            checkMigrationMutable(current);
             persistenceService.deleteAgent(namespaceId, agentName);
-            scheduleAgentIndexMaintenance(namespaceId, agentName);
+            scheduleAgentIndexMaintenance(namespaceId, agentName,
+                AiResourceChangeOperation.DELETE, true);
             traceLegacySuccess(agentName, null, OP_LEGACY_A2A_DELETE, "mode=agent");
             return true;
         } catch (Exception e) {
@@ -481,7 +604,8 @@ public class AgentOperationService {
      * @throws NacosException when update fails
      */
     public AgentVersionDetail updateDraft(String namespaceId, String agentName, String version,
-        List<AgentCallInterface> callInterfaces, String changeDescription) throws NacosException {
+        List<AgentCallInterface> callInterfaces, String changeDescription)
+        throws NacosException {
         requireWritableMeta(namespaceId, agentName);
         AgentVersionDetail result = persistenceService.updateDraft(namespaceId, agentName, version,
             callInterfaces, changeDescription);
@@ -518,7 +642,8 @@ public class AgentOperationService {
     public void deleteAgent(String namespaceId, String agentName) throws NacosException {
         requireWritableMeta(namespaceId, agentName);
         persistenceService.deleteAgent(namespaceId, agentName);
-        scheduleAgentIndexMaintenance(namespaceId, agentName);
+        scheduleAgentIndexMaintenance(namespaceId, agentName,
+            AiResourceChangeOperation.DELETE, true);
         AiResourceTraceService.logSuccess(RESOURCE_TYPE, agentName, null,
             AiResourceTraceService.OP_DELETE_RESOURCE, VisibilityHelper.resolveCurrentIdentity(),
             VisibilityHelper.resolveClientIp());
@@ -653,7 +778,8 @@ public class AgentOperationService {
                 + versionInfo.getEditingVersion());
         }
         resourceManager.doRedraft(namespaceId, agentName, RESOURCE_TYPE, version);
-        scheduleAgentIndexMaintenance(namespaceId, agentName);
+        scheduleAgentIndexMaintenance(namespaceId, agentName,
+            AiResourceChangeOperation.UPDATE, false);
         return persistenceService.getAgentVersionSummary(namespaceId, agentName, version);
     }
     
@@ -695,7 +821,8 @@ public class AgentOperationService {
         persistenceService.updateVersionStatus(namespaceId, agentName, version,
             AiConstants.Agent.VERSION_STATUS_OFFLINE);
         persistenceService.synchronizeDerivedState(namespaceId, agentName, null, null, null, null);
-        scheduleAgentIndexMaintenance(namespaceId, agentName);
+        scheduleAgentIndexMaintenance(namespaceId, agentName,
+            AiResourceChangeOperation.UPDATE, false);
         AiResourceTraceService.logSuccess(RESOURCE_TYPE, agentName, version,
             AiResourceTraceService.OP_OFFLINE_VERSION, VisibilityHelper.resolveCurrentIdentity(),
             VisibilityHelper.resolveClientIp());
@@ -711,12 +838,15 @@ public class AgentOperationService {
      * @return updated Agent
      * @throws NacosException when a target Version is absent or in a working state
      */
-    public Agent updateLabels(String namespaceId, String agentName, Map<String, String> labels)
+    public AgentSummary updateLabels(String namespaceId, String agentName,
+        Map<String, String> labels)
         throws NacosException {
         requireWritableMeta(namespaceId, agentName);
-        Agent result = persistenceService.synchronizeDerivedState(namespaceId, agentName, null,
-            labels, null, null);
-        scheduleAgentIndexMaintenance(namespaceId, agentName);
+        AgentSummary result =
+            persistenceService.synchronizeDerivedState(namespaceId, agentName, null,
+                labels, null, null);
+        scheduleAgentIndexMaintenance(namespaceId, agentName,
+            AiResourceChangeOperation.UPDATE, false);
         AiResourceTraceService.logSuccess(RESOURCE_TYPE, agentName, null,
             AiResourceTraceService.OP_UPDATE_LABELS, VisibilityHelper.resolveCurrentIdentity(),
             VisibilityHelper.resolveClientIp());
@@ -731,7 +861,7 @@ public class AgentOperationService {
         pipelineInfo.setStatus(PipelineExecutionStatus.IN_PROGRESS);
         pipelineInfo.setPipeline(new ArrayList<>());
         persistenceService.updatePublishPipelineInfo(namespaceId, agentName, version,
-            JacksonUtils.toJson(pipelineInfo));
+            JsonUtils.toJson(pipelineInfo));
         String result = publishPipelineExecutor.execute(context,
             pipelineResult -> onPipelineComplete(namespaceId, agentName, version, executionId,
                 pipelineResult),
@@ -869,7 +999,7 @@ public class AgentOperationService {
                 : result.getStatus());
             completed.setPipeline(result == null ? null : result.getPipeline());
             persistenceService.updatePublishPipelineInfo(namespaceId, agentName, version,
-                JacksonUtils.toJson(completed));
+                JsonUtils.toJson(completed));
             
             AiResourceVersion latest =
                 persistenceService.requireVersionRow(namespaceId, agentName, version);
@@ -899,16 +1029,50 @@ public class AgentOperationService {
             AiConstants.Agent.VERSION_STATUS_ONLINE);
         persistenceService.synchronizeDerivedState(namespaceId, agentName, version, null,
             clearEditing ? version : null, clearReviewing ? version : null);
-        scheduleAgentIndexMaintenance(namespaceId, agentName);
+        scheduleAgentIndexMaintenance(namespaceId, agentName,
+            AiResourceChangeOperation.UPDATE, false);
     }
     
-    private void scheduleAgentIndexMaintenance(String namespaceId, String agentName) {
+    private void scheduleAgentIndexMaintenance(String namespaceId, String agentName,
+        AiResourceChangeOperation operation, boolean storageChanged) {
         try {
             resourceIndexMaintenanceService.schedule(namespaceId, RESOURCE_TYPE, agentName);
         } catch (RuntimeException e) {
             LOGGER.warn("Failed to schedule Agent search-index maintenance for {} in namespace {}",
                 agentName, namespaceId, e);
         }
+        try {
+            resourceChangeNotifier.notifyChanged(namespaceId, RESOURCE_TYPE, agentName, operation,
+                storageChanged);
+        } catch (RuntimeException e) {
+            LOGGER.warn("Failed to notify AI resource change for Agent {} in namespace {}",
+                agentName, namespaceId, e);
+        }
+    }
+    
+    /**
+     * Update Agent visibility without changing Version or Runtime state.
+     *
+     * @param namespaceId namespace identifier
+     * @param agentName canonical Agent name
+     * @param scope PUBLIC or PRIVATE, case-insensitive
+     * @throws NacosException when validation, authorization, migration, or persistence fails
+     */
+    public void updateScope(String namespaceId, String agentName, String scope)
+        throws NacosException {
+        if (StringUtils.isBlank(scope)) {
+            throw new NacosApiException(NacosException.INVALID_PARAM, ErrorCode.PARAMETER_MISSING,
+                "Required parameter 'scope' type String is not present");
+        }
+        if (!VisibilityConstants.SCOPE_PUBLIC.equalsIgnoreCase(scope)
+            && !VisibilityConstants.SCOPE_PRIVATE.equalsIgnoreCase(scope)) {
+            throw new NacosApiException(NacosException.INVALID_PARAM,
+                ErrorCode.PARAMETER_VALIDATE_ERROR, "Parameter 'scope' must be PUBLIC or PRIVATE");
+        }
+        requireWritableMeta(namespaceId, agentName);
+        resourceManager.doUpdateScope(namespaceId, agentName, RESOURCE_TYPE, scope);
+        scheduleAgentIndexMaintenance(namespaceId, agentName, AiResourceChangeOperation.UPDATE,
+            false);
     }
     
     private AiResource requireMeta(String namespaceId, String agentName) throws NacosException {
@@ -921,7 +1085,14 @@ public class AgentOperationService {
         throws NacosException {
         AiResource result = requireMeta(namespaceId, agentName);
         VisibilityHelper.checkWritableResource(result);
+        checkMigrationMutable(result);
         return result;
+    }
+    
+    private void checkMigrationMutable(AiResource resource) throws NacosException {
+        if (migrationMutationGuard != null) {
+            migrationMutationGuard.checkMutable(resource);
+        }
     }
     
     private AiResourceVersion requireVersionState(String namespaceId, String agentName,
@@ -964,7 +1135,7 @@ public class AgentOperationService {
             + AiConstants.Agent.VERSION_STATUS_ONLINE;
     }
     
-    private AgentVersionDetail toDraft(AgentDraftCreateRequest request) {
+    private AgentVersionDetail toDraft(AbstractAgentDraftRequest request) {
         AgentVersionDetail result = new AgentVersionDetail();
         result.setVersion(request.getVersion());
         result.setCallInterfaces(request.getCallInterfaces());
@@ -973,8 +1144,8 @@ public class AgentOperationService {
         return result;
     }
     
-    private Agent toInitialAgent(String namespaceId, AgentDraftCreateRequest request) {
-        Agent result = new Agent();
+    private AgentSummary toInitialAgent(String namespaceId, AbstractAgentDraftRequest request) {
+        AgentSummary result = new AgentSummary();
         result.setNamespaceId(namespaceId);
         result.setAgentName(request.getAgentName());
         result.setDisplayName(request.getDisplayName());
@@ -990,13 +1161,14 @@ public class AgentOperationService {
         return result;
     }
     
-    private Agent toInitialLegacyAgent(String namespaceId, AgentDraftCreateRequest request) {
-        Agent result = toInitialAgent(namespaceId, request);
+    private AgentSummary toInitialLegacyAgent(String namespaceId,
+        AgentDraftCreateRequest request) {
+        AgentSummary result = toInitialAgent(namespaceId, request);
         result.setScope(VisibilityConstants.SCOPE_PUBLIC);
         return result;
     }
     
-    private void requireInitialDraftContent(AgentDraftCreateRequest request) {
+    private void requireInitialDraftContent(AbstractAgentDraftRequest request) {
         if (StringUtils.isNotBlank(request.getBasedOnVersion())
             || request.getCallInterfaces() == null) {
             throw new IllegalArgumentException(
@@ -1004,7 +1176,7 @@ public class AgentOperationService {
         }
     }
     
-    private boolean hasInitialAgentMetadata(AgentDraftCreateRequest request) {
+    private boolean hasInitialAgentMetadata(AbstractAgentDraftRequest request) {
         return request.getDisplayName() != null || request.getDescription() != null
             || request.getIconUrl() != null || request.getProvider() != null
             || request.getTags() != null || request.getExtensions() != null;

@@ -16,6 +16,8 @@
 
 package com.alibaba.nacos.console.controller.v3.ai;
 
+import com.alibaba.nacos.api.ai.model.mcp.McpServerVersionDetail;
+import com.alibaba.nacos.api.ai.model.mcp.McpServerVersionSummary;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerBasicInfo;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerDetailInfo;
 import com.alibaba.nacos.api.ai.model.mcp.McpServerImportResponse;
@@ -44,6 +46,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
+import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -51,6 +54,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -157,6 +163,89 @@ class ConsoleMcpControllerTest {
             });
         assertEquals(ErrorCode.SUCCESS.getCode(), result.getCode());
         assertEquals("ok", result.getData());
+    }
+    
+    @Test
+    void testStandardLifecycleApisDelegateByNameAndExactVersion() throws Exception {
+        McpServerVersionDetail detail = new McpServerVersionDetail();
+        McpServerVersionSummary summary = new McpServerVersionSummary();
+        when(mcpProxy.listMcpServerVersions("nacos-default-mcp", "test", "draft", 1, 10))
+            .thenReturn(new Page<>());
+        when(mcpProxy.getMcpServerVersion("nacos-default-mcp", "test", "1.0.0"))
+            .thenReturn(detail);
+        when(mcpProxy.createMcpServerDraft(eq("nacos-default-mcp"),
+            any(McpServerBasicInfo.class), isNull(), isNull(), isNull())).thenReturn(detail);
+        when(mcpProxy.updateMcpServerDraft(eq("nacos-default-mcp"),
+            any(McpServerBasicInfo.class), isNull(), isNull(), isNull())).thenReturn(detail);
+        when(mcpProxy.submitMcpServerVersion("nacos-default-mcp", "test", "1.0.0"))
+            .thenReturn(summary);
+        when(mcpProxy.publishMcpServerVersion("nacos-default-mcp", "test", "1.0.0"))
+            .thenReturn(summary);
+        when(mcpProxy.forcePublishMcpServerVersion("nacos-default-mcp", "test", "1.0.0"))
+            .thenReturn(summary);
+        when(mcpProxy.redraftMcpServerVersion("nacos-default-mcp", "test", "1.0.0"))
+            .thenReturn(summary);
+        when(mcpProxy.onlineMcpServerVersion("nacos-default-mcp", "test", "1.0.0"))
+            .thenReturn(summary);
+        when(mcpProxy.offlineMcpServerVersion("nacos-default-mcp", "test", "1.0.0"))
+            .thenReturn(summary);
+        when(mcpProxy.updateMcpServerLabels("nacos-default-mcp", "test", Map.of()))
+            .thenReturn(Map.of());
+        
+        assertEquals(200, mockMvc.perform(MockMvcRequestBuilders.get(
+            "/v3/console/ai/mcp/versions").param("namespaceId", "nacos-default-mcp")
+            .param("mcpName", "test").param("status", "draft").param("pageNo", "1")
+            .param("pageSize", "10")).andReturn().getResponse().getStatus());
+        assertEquals(200, lifecycleVersionRequest(MockMvcRequestBuilders.get(
+            "/v3/console/ai/mcp/version")).andReturn().getResponse().getStatus());
+        assertEquals(200, lifecycleDraftRequest(MockMvcRequestBuilders.post(
+            "/v3/console/ai/mcp/draft")).andReturn().getResponse().getStatus());
+        assertEquals(200, lifecycleDraftRequest(MockMvcRequestBuilders.put(
+            "/v3/console/ai/mcp/draft")).andReturn().getResponse().getStatus());
+        assertEquals(200, lifecycleVersionRequest(MockMvcRequestBuilders.delete(
+            "/v3/console/ai/mcp/draft")).andReturn().getResponse().getStatus());
+        assertEquals(200, lifecycleVersionRequest(MockMvcRequestBuilders.post(
+            "/v3/console/ai/mcp/submit")).andReturn().getResponse().getStatus());
+        assertEquals(200, lifecycleVersionRequest(MockMvcRequestBuilders.post(
+            "/v3/console/ai/mcp/publish")).andReturn().getResponse().getStatus());
+        assertEquals(200, lifecycleVersionRequest(MockMvcRequestBuilders.post(
+            "/v3/console/ai/mcp/force-publish")).andReturn().getResponse().getStatus());
+        assertEquals(200, lifecycleVersionRequest(MockMvcRequestBuilders.post(
+            "/v3/console/ai/mcp/redraft")).andReturn().getResponse().getStatus());
+        assertEquals(200, lifecycleVersionRequest(MockMvcRequestBuilders.post(
+            "/v3/console/ai/mcp/online")).andReturn().getResponse().getStatus());
+        assertEquals(200, lifecycleVersionRequest(MockMvcRequestBuilders.post(
+            "/v3/console/ai/mcp/offline")).andReturn().getResponse().getStatus());
+        assertEquals(200, mockMvc.perform(MockMvcRequestBuilders.put(
+            "/v3/console/ai/mcp/labels").param("namespaceId", "nacos-default-mcp")
+            .param("mcpName", "test")).andReturn().getResponse().getStatus());
+        assertEquals(200, mockMvc.perform(MockMvcRequestBuilders.put(
+            "/v3/console/ai/mcp/status").param("namespaceId", "nacos-default-mcp")
+            .param("mcpName", "test").param("enabled", "false"))
+            .andReturn().getResponse().getStatus());
+        assertEquals(200, mockMvc.perform(MockMvcRequestBuilders.put(
+            "/v3/console/ai/mcp/scope").param("namespaceId", "nacos-default-mcp")
+            .param("mcpName", "test").param("scope", "private"))
+            .andReturn().getResponse().getStatus());
+        
+        verify(mcpProxy).deleteMcpServerDraft("nacos-default-mcp", "test", "1.0.0");
+        verify(mcpProxy).updateMcpServerLabels("nacos-default-mcp", "test", Map.of());
+        verify(mcpProxy).updateMcpServerStatus("nacos-default-mcp", "test", false);
+        verify(mcpProxy).updateMcpServerScope("nacos-default-mcp", "test", "private");
+    }
+    
+    @Test
+    void testStandardResourceUpdatesValidateRequiredValues() throws Exception {
+        assertEquals(400, mockMvc.perform(MockMvcRequestBuilders.put(
+            "/v3/console/ai/mcp/status").param("namespaceId", "nacos-default-mcp")
+            .param("mcpName", "test")).andReturn().getResponse().getStatus());
+        assertEquals(400, mockMvc.perform(MockMvcRequestBuilders.put(
+            "/v3/console/ai/mcp/scope").param("namespaceId", "nacos-default-mcp")
+            .param("mcpName", "test")).andReturn().getResponse().getStatus());
+        assertEquals(400, mockMvc.perform(MockMvcRequestBuilders.put(
+            "/v3/console/ai/mcp/scope").param("namespaceId", "nacos-default-mcp")
+            .param("mcpName", "test").param("scope", "team"))
+            .andReturn().getResponse().getStatus());
     }
     
     @Test
@@ -312,5 +401,18 @@ class ConsoleMcpControllerTest {
             });
         assertEquals(ErrorCode.API_DEPRECATED.getCode(), result.getCode());
         assertTrue(result.getData().contains(alternative));
+    }
+    
+    private org.springframework.test.web.servlet.ResultActions lifecycleVersionRequest(
+        MockHttpServletRequestBuilder request) throws Exception {
+        return mockMvc.perform(request.param("namespaceId", "nacos-default-mcp")
+            .param("mcpName", "test").param("version", "1.0.0"));
+    }
+    
+    private org.springframework.test.web.servlet.ResultActions lifecycleDraftRequest(
+        MockHttpServletRequestBuilder request) throws Exception {
+        return lifecycleVersionRequest(request.param("serverSpecification",
+            "{\"protocol\":\"stdio\",\"name\":\"test\","
+                + "\"versionDetail\":{\"version\":\"1.0.0\"},\"enabled\":true}"));
     }
 }

@@ -73,15 +73,15 @@ V3 HTTP 行为当前由以下代码位置定义：
 | `/v3/client/ai/prompt` | 2 | GET | 运行时 Prompt 查询和 Search。 |
 | `/v3/client/ai/skills` | 2 | GET | 运行时 Skill zip 下载和 Search。 |
 | `/v3/client/ai/agentspecs` | 2 | GET | 运行时 AgentSpec 获取和搜索。 |
-| `/v3/client/ai/mcp` | 1 | GET | 运行时 MCP Search。 |
+| `/v3/client/ai/mcp` | 6 | GET, POST, PUT, DELETE | MCP Search、Serving Query、兼容 Release、Runtime Endpoint Publication 和 Heartbeat。 |
 | `/v3/admin/core/*` | 25 | GET, POST, PUT, DELETE | Loader、集群、ops、命名空间、状态、插件。 |
 | `/v3/admin/cs/*` | 25 | GET, POST, PUT, DELETE | 配置 CRUD、历史、监听者、容量、指标、ops。 |
 | `/v3/admin/ns/*` | 29 | GET, POST, PUT, DELETE | 服务、实例、客户端、集群、健康状态、ops。 |
-| `/v3/admin/ai/*` | 89 | GET, POST, PUT, DELETE | MCP、A2A、Agent、Prompt、Skill、AgentSpec、Pipeline。 |
+| `/v3/admin/ai/*` | 104 | GET, POST, PUT, DELETE | MCP、A2A、Agent、Prompt、Skill、AgentSpec、Pipeline。 |
 | `/v3/console/core/*` | 7 | GET, POST, PUT, DELETE | 控制台集群和命名空间操作。 |
 | `/v3/console/cs/*` | 17 | GET, POST, DELETE | 控制台配置和历史操作。 |
 | `/v3/console/ns/*` | 11 | GET, POST, PUT, DELETE | 控制台服务和实例操作。 |
-| `/v3/console/ai/*` | 67 | GET, POST, PUT, DELETE | 控制台 AI 管理、导入、生命周期、Pipeline。 |
+| `/v3/console/ai/*` | 82 | GET, POST, PUT, DELETE | 控制台 AI 管理、导入、生命周期、Pipeline。 |
 | `/v3/console/copilot/*` | 6 | GET, POST | 配置和 SSE Copilot 操作。 |
 | `/v3/auth/user` | 7 | GET, POST, PUT, DELETE | 默认鉴权插件中的用户登录和管理。 |
 | `/v3/auth/role` | 4 | GET, POST, DELETE | 默认鉴权插件中的角色管理。 |
@@ -223,14 +223,16 @@ Admin 路径使用已实现的 `/v3/admin/ai/agents` 前缀；Console 目标路�
 | `/online` | POST | 将 Offline Version 上线。 |
 | `/offline` | POST | 将 Online Version 下线。 |
 | `/labels` | PUT | 更新自定义 Version Label。 |
+| `/scope` | PUT | 修改 Agent Resource 的 `PUBLIC`/`PRIVATE` 可见性，保留 Version 与 Runtime 状态。 |
 
 目标 API 不增加 Client HTTP Watch 或 Endpoint List GET。Watch 和 Push 使用协商后的
 gRPC Binding；Runtime 查看使用 Admin 或 Console 的 `/runtime-endpoints` 路径。
 
 ## 9. 已批准的 MCP 生命周期 API 面
 
-下列路径是 [MCP Server 规范](../ai/mcp-server-spec.md)确定的实验性目标管理 API 面。
-在对应 Controller、Form、鉴权、领域服务和集成测试完成前，它们不属于当前已实现清单。
+下列路径是按 [MCP Server 规范](../ai/mcp-server-spec.md)实现的实验性管理 API 面。只有 MCP
+管理权威完成单向切换并达到 `LIFECYCLE_MANAGED` 后才可用；切换前，有效请求返回
+`RESOURCE_CONFLICT`，且不会修改历史 MCP 状态。
 
 Admin 使用 `/v3/admin/ai/mcp`；Console 使用 `/v3/console/ai/mcp`，作为相同相对生命周期
 契约的 UI Facade：
@@ -247,6 +249,25 @@ Admin 使用 `/v3/admin/ai/mcp`；Console 使用 `/v3/console/ai/mcp`，作为�
 | `/online` | POST | 将 Offline Version 上线并设为 latest。 |
 | `/offline` | POST | 将 Online Version 下线，并在需要时修复 latest。 |
 | `/labels` | PUT | 更新自定义 Label，忽略客户端提供的 `latest`。 |
+| `/status` | PUT | 启用或禁用 MCP Resource，不改变 Version 状态。 |
+| `/scope` | PUT | 在 `PUBLIC` 与 `PRIVATE` 之间修改 MCP Resource 可见范围。 |
+
+所有路径都使用 Form/Query 参数。通用身份字段是可选的 `namespaceId`（默认 `public`）、
+必填 `mcpName`，以及除 `/versions`、`/labels`、`/status` 和 `/scope` 外必填的精确 `version`。`/versions`
+还接受可选 `status` 以及受限的 `pageNo`、`pageSize`。
+
+`POST` 和 `PUT /draft` 还接受必填 JSON `serverSpecification`，以及可选 JSON
+`toolSpecification`、`resourceSpecification`、`endpointSpecification`。外层
+`mcpName` 和 `version` 是 Canonical Identity；`serverSpecification` 中重复出现的名称或
+Version 必须一致，并拒绝 `serverSpecification.id`。`/labels` 接受 JSON String Map；空输入
+表示清空自定义 Label，同时保留服务端管理的 Label。`/status` 要求 Boolean `enabled`；
+`/scope` 要求不区分大小写的 `PUBLIC` 或 `PRIVATE`。
+
+Version 列表返回 `Page<McpServerVersionSummary>`。精确读取和 Draft 写入返回
+`McpServerVersionDetail`，其中包含生命周期 Metadata 和 Server/Tools/Resources 内容，但不包含
+内部 MCP ID。Detail 还会投影生命周期管理客户端所需的 Resource Status、Owner、Scope、Writable Flag、Labels、
+Editing/Reviewing 指针和 Online Version 数量。生命周期命令返回转换后的 Summary，删除 Draft 返回空 Success Result，替换 Label
+返回最终生效的 Label Map。
 
 现有 MCP create/update/delete 路径和参数形态作为兼容专用的 direct-online Facade 保留，
 不能复制为新的生命周期 Form。尤其是同 Version 内容覆盖只允许通过历史更新路由执行。
@@ -257,8 +278,26 @@ Admin 使用 `/v3/admin/ai/mcp`；Console 使用 `/v3/console/ai/mcp`，作为�
 校验同时提供的名称，再进入相同的 Name-Based 鉴权和 Lifecycle Service。现有响应 ID
 字段保持 Wire-Compatible。
 
-该目标不新增 MCP Client HTTP query、release、endpoint、heartbeat 或 subscription 路径。
-HTTP 与现有 gRPC/Java Client 表面对齐，需要等生命周期托管完成后再独立设计。
+MCP Client HTTP Binding 使用 `/v3/client/ai/mcp`：
+
+| Method | Path | 契约 |
+| --- | --- | --- |
+| GET | `/v3/client/ai/mcp/search` | 现有 Current MCP Search Facade。 |
+| GET | `/v3/client/ai/mcp` | 按 `namespaceId + mcpName (+ version)` 查询 Latest Published 或一个精确 Serving Version。 |
+| POST | `/v3/client/ai/mcp` | Form Release；`createDraft` 缺失或为 false 时 Direct-online，为 true 时只创建生命周期 Draft。 |
+| POST | `/v3/client/ai/mcp/endpoints` | 使用 IP 字面地址及 `1..65535` 端口注册当前 HTTP Client 的 Runtime Endpoint。 |
+| DELETE | `/v3/client/ai/mcp/endpoints` | 使用相同的已校验身份注销当前 HTTP Client 匹配的 Runtime Endpoint。 |
+| PUT | `/v3/client/ai/mcp/endpoints/heartbeat` | 刷新共享 AI HTTP Client 及其全部 Publisher。 |
+
+所有写使用 Form/Query Binding。`serverSpecification`、`toolSpecification`、
+`resourceSpecification` 和 `endpointSpecification` 都是 JSON String 字段，不使用 JSON Body。
+有状态 Endpoint Path 要求稳定的 `X-Nacos-Client-Id` 与 `Request-Module: AI` Header。Query
+可以携带 Client Id，但只续约已经存在的 Client。不增加新的顶层 `mcpId` Input。
+
+Embedded 或 Standalone Console 直接委托与 Admin 相同的生命周期 Application Service。
+Console-only Remote 部署需要下一 MCP 治理阶段计划的 Typed Maintainer Lifecycle Transport；在该
+Transport 落地前，新 Console 生命周期路径在 Remote 模式下返回 `API_FUNCTION_DISABLED`，不会回退到
+Legacy 或基于 ID 的写路径。
 
 ## 10. 文档 Gap 记录
 

@@ -27,17 +27,12 @@ import com.alibaba.nacos.api.ai.model.a2a.AgentCard;
 import com.alibaba.nacos.api.ai.model.a2a.AgentCardDetailInfo;
 import com.alibaba.nacos.api.ai.model.a2a.AgentCardVersionInfo;
 import com.alibaba.nacos.api.ai.model.a2a.AgentInterface;
-import com.alibaba.nacos.api.ai.model.agent.Agent;
-import com.alibaba.nacos.api.ai.model.agent.AgentCallInterface;
-import com.alibaba.nacos.api.ai.model.agent.AgentDraftCreateRequest;
-import com.alibaba.nacos.api.ai.model.agent.AgentProvider;
 import com.alibaba.nacos.api.ai.model.agent.AgentSummary;
-import com.alibaba.nacos.api.ai.model.agent.AgentVersionCatalogEntry;
+import com.alibaba.nacos.api.ai.model.agent.AgentCallInterface;
 import com.alibaba.nacos.api.ai.model.agent.AgentVersionSummary;
-import com.alibaba.nacos.api.ai.model.agent.Endpoint;
 import com.alibaba.nacos.api.ai.model.agent.EndpointSource;
-import com.alibaba.nacos.api.ai.utils.EndpointCanonicalizer;
 import com.alibaba.nacos.api.ai.utils.EndpointNaturalKey;
+import com.alibaba.nacos.api.ai.utils.A2aEndpointUtils;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.exception.api.NacosApiException;
 import com.alibaba.nacos.api.model.Page;
@@ -46,7 +41,7 @@ import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.alibaba.nacos.api.naming.pojo.ServiceInfo;
 import com.alibaba.nacos.common.executor.ExecutorFactory;
 import com.alibaba.nacos.common.executor.NameThreadFactory;
-import com.alibaba.nacos.common.utils.JacksonUtils;
+import com.alibaba.nacos.api.utils.json.JsonUtils;
 import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.naming.core.v2.index.ServiceStorage;
 import com.alibaba.nacos.naming.core.v2.pojo.Service;
@@ -81,9 +76,7 @@ import java.util.concurrent.ExecutorService;
 @Component
 public class A2aServerOperationService implements A2aOperationService {
     
-    private static final String A2A_PROTOCOL = "a2a";
-    
-    private static final String JSON_MEDIA_TYPE = "application/json";
+    private static final String A2A_PROTOCOL = A2aCanonicalDefinitionConverter.A2A_PROTOCOL;
     
     private static final int SCAN_PAGE_SIZE = 100;
     
@@ -99,18 +92,22 @@ public class A2aServerOperationService implements A2aOperationService {
     
     private final ServiceStorage serviceStorage;
     
+    private final A2aCanonicalDefinitionConverter definitionConverter;
+    
     private final Executor projectionExecutor;
     
     @Autowired
     public A2aServerOperationService(AgentOperationService agentOperationService,
-        ServiceStorage serviceStorage) {
-        this(agentOperationService, serviceStorage, PROJECTION_EXECUTOR);
+        ServiceStorage serviceStorage, A2aCanonicalDefinitionConverter definitionConverter) {
+        this(agentOperationService, serviceStorage, definitionConverter, PROJECTION_EXECUTOR);
     }
     
     A2aServerOperationService(AgentOperationService agentOperationService,
-        ServiceStorage serviceStorage, Executor projectionExecutor) {
+        ServiceStorage serviceStorage, A2aCanonicalDefinitionConverter definitionConverter,
+        Executor projectionExecutor) {
         this.agentOperationService = agentOperationService;
         this.serviceStorage = serviceStorage;
+        this.definitionConverter = definitionConverter;
         this.projectionExecutor = projectionExecutor;
     }
     
@@ -124,10 +121,10 @@ public class A2aServerOperationService implements A2aOperationService {
      */
     public void registerAgent(AgentCard agentCard, String namespaceId, String registrationType)
         throws NacosException {
-        String normalizedType = normalizeRegistrationType(registrationType,
+        String normalizedType = definitionConverter.normalizeRegistrationType(registrationType,
             AiConstants.A2a.A2A_ENDPOINT_TYPE_URL);
         agentOperationService.registerLegacyOnlineVersion(namespaceId,
-            toCreateRequest(namespaceId, agentCard, normalizedType, true));
+            definitionConverter.convert(namespaceId, agentCard, normalizedType, true));
     }
     
     /**
@@ -141,10 +138,11 @@ public class A2aServerOperationService implements A2aOperationService {
      */
     public void releaseAgent(AgentCard agentCard, String namespaceId, String registrationType,
         boolean setAsLatest) throws NacosException {
-        String normalizedType = normalizeRegistrationType(registrationType,
+        String normalizedType = definitionConverter.normalizeRegistrationType(registrationType,
             AiConstants.A2a.A2A_ENDPOINT_TYPE_SERVICE);
         agentOperationService.releaseLegacyOnlineVersion(namespaceId,
-            toCreateRequest(namespaceId, agentCard, normalizedType, true), setAsLatest);
+            definitionConverter.convert(namespaceId, agentCard, normalizedType, true),
+            setAsLatest);
     }
     
     /**
@@ -161,9 +159,10 @@ public class A2aServerOperationService implements A2aOperationService {
         String normalizedType = StringUtils.isBlank(registrationType)
             ? resolveInheritedRegistrationType(namespaceId, agentCard.getName(),
                 agentCard.getVersion())
-            : normalizeRegistrationType(registrationType, null);
+            : definitionConverter.normalizeRegistrationType(registrationType, null);
         agentOperationService.updateLegacyOnlineVersion(namespaceId,
-            toCreateRequest(namespaceId, agentCard, normalizedType, false), setAsLatest);
+            definitionConverter.convert(namespaceId, agentCard, normalizedType, false),
+            setAsLatest);
     }
     
     /**
@@ -273,8 +272,8 @@ public class A2aServerOperationService implements A2aOperationService {
      */
     public List<com.alibaba.nacos.api.ai.model.a2a.AgentVersionDetail> listAgentVersions(
         String namespaceId, String name) throws NacosException {
-        Agent agent = getLegacyAgent(namespaceId, name);
-        Set<String> a2aVersions = a2aVersions(agent.getVersionCatalog().getOnlineVersions());
+        AgentSummary agent = getLegacyAgent(namespaceId, name);
+        Set<String> a2aVersions = a2aVersions(agent.getVersionInfo().getOnlineVersions());
         if (a2aVersions.isEmpty()) {
             throw agentNotFound(name);
         }
@@ -284,11 +283,11 @@ public class A2aServerOperationService implements A2aOperationService {
     
     private AgentCardDetailInfo projectAgentCard(String namespaceId, String agentName,
         String version, String registrationType, boolean clientRead) throws NacosException {
-        Agent agent = getLegacyAgent(namespaceId, agentName);
+        AgentSummary agent = getLegacyAgent(namespaceId, agentName);
         if (clientRead && !AiConstants.Agent.RESOURCE_STATUS_ENABLE.equals(agent.getStatus())) {
             throw agentNotFound(agentName);
         }
-        Set<String> a2aVersions = a2aVersions(agent.getVersionCatalog().getOnlineVersions());
+        Set<String> a2aVersions = a2aVersions(agent.getVersionInfo().getOnlineVersions());
         if (a2aVersions.isEmpty()) {
             throw agentNotFound(agentName);
         }
@@ -312,7 +311,7 @@ public class A2aServerOperationService implements A2aOperationService {
             targetVersion);
         String storedType = registrationType(callInterface);
         String queryType = StringUtils.isBlank(registrationType) ? storedType
-            : normalizeRegistrationType(registrationType, null);
+            : definitionConverter.normalizeRegistrationType(registrationType, null);
         AgentCardDetailInfo result = toLegacyCard(callInterface, agentName, targetVersion,
             storedType);
         if (AiConstants.A2a.A2A_ENDPOINT_TYPE_SERVICE.equals(queryType)) {
@@ -324,82 +323,9 @@ public class A2aServerOperationService implements A2aOperationService {
         return result;
     }
     
-    private AgentDraftCreateRequest toCreateRequest(String namespaceId, AgentCard source,
-        String registrationType, boolean includeMetadata) throws NacosException {
-        AgentCard card = copyAgentCard(source);
-        AgentRequestUtil.validateAgentCard(card);
-        AgentCallInterface callInterface = new AgentCallInterface();
-        callInterface.setProtocol(A2A_PROTOCOL);
-        callInterface.setProtocolVersion(card.getProtocolVersion());
-        callInterface.setDescriptorMediaType(JSON_MEDIA_TYPE);
-        callInterface.setNativeDescriptor(toNativeDescriptor(card));
-        callInterface.setEndpointSourceOrder(sourceOrder(registrationType));
-        callInterface.setDeclaredEndpoints(declaredEndpoints(namespaceId, card));
-        AgentDraftCreateRequest result = new AgentDraftCreateRequest();
-        result.setAgentName(card.getName());
-        result.setVersion(card.getVersion());
-        result.setCallInterfaces(Collections.singletonList(callInterface));
-        if (includeMetadata) {
-            result.setDescription(card.getDescription());
-            result.setIconUrl(card.getIconUrl());
-            result.setProvider(toAgentProvider(card));
-        }
-        return result;
-    }
-    
-    private AgentCard copyAgentCard(AgentCard source) {
-        if (source == null) {
-            throw new IllegalArgumentException("AgentCard must not be null");
-        }
-        return JacksonUtils.toObj(JacksonUtils.toJson(source), AgentCard.class);
-    }
-    
-    private Object toNativeDescriptor(AgentCard card) {
-        return JacksonUtils.toObj(JacksonUtils.toJson(card), Map.class);
-    }
-    
-    private AgentProvider toAgentProvider(AgentCard card) {
-        if (card.getProvider() == null) {
-            return null;
-        }
-        AgentProvider result = new AgentProvider();
-        result.setName(card.getProvider().getOrganization());
-        result.setUrl(card.getProvider().getUrl());
-        return result;
-    }
-    
-    private List<EndpointSource> sourceOrder(String registrationType) {
-        List<EndpointSource> result = new ArrayList<EndpointSource>(2);
-        if (AiConstants.A2a.A2A_ENDPOINT_TYPE_SERVICE.equals(registrationType)) {
-            result.add(EndpointSource.RUNTIME);
-            result.add(EndpointSource.DECLARED);
-        } else {
-            result.add(EndpointSource.DECLARED);
-            result.add(EndpointSource.RUNTIME);
-        }
-        return result;
-    }
-    
-    private List<Endpoint> declaredEndpoints(String namespaceId, AgentCard card) {
-        List<Endpoint> result = new ArrayList<Endpoint>();
-        Set<EndpointNaturalKey> keys = new LinkedHashSet<EndpointNaturalKey>();
-        for (AgentInterface agentInterface : card.getSupportedInterfaces()) {
-            Endpoint endpoint = new Endpoint();
-            endpoint.setUri(agentInterface.getUrl());
-            endpoint.setTransport(agentInterface.getProtocolBinding());
-            Endpoint canonical = EndpointCanonicalizer.canonicalize(endpoint);
-            EndpointNaturalKey key = EndpointNaturalKey.of(namespaceId, card.getName(),
-                A2A_PROTOCOL, canonical);
-            if (keys.add(key)) {
-                result.add(canonical);
-            }
-        }
-        return result;
-    }
-    
     private String resolveInheritedRegistrationType(String namespaceId, String agentName,
         String version) throws NacosException {
-        Agent agent = getLegacyAgent(namespaceId, agentName);
+        AgentSummary agent = getLegacyAgent(namespaceId, agentName);
         AgentCallInterface target = findA2aCallInterface(
             getVersionIfA2a(namespaceId, agentName, version));
         if (target != null) {
@@ -423,20 +349,6 @@ public class A2aServerOperationService implements A2aOperationService {
             }
             throw e;
         }
-    }
-    
-    private String normalizeRegistrationType(String value, String defaultValue)
-        throws NacosApiException {
-        if (StringUtils.isBlank(value) && defaultValue != null) {
-            return defaultValue;
-        }
-        if (AiConstants.A2a.A2A_ENDPOINT_TYPE_URL.equalsIgnoreCase(value)) {
-            return AiConstants.A2a.A2A_ENDPOINT_TYPE_URL;
-        }
-        if (AiConstants.A2a.A2A_ENDPOINT_TYPE_SERVICE.equalsIgnoreCase(value)) {
-            return AiConstants.A2a.A2A_ENDPOINT_TYPE_SERVICE;
-        }
-        throw invalidRegistrationType(value);
     }
     
     private AgentCallInterface requireA2aCallInterface(
@@ -470,10 +382,11 @@ public class A2aServerOperationService implements A2aOperationService {
                 : AiConstants.A2a.A2A_ENDPOINT_TYPE_URL;
     }
     
-    private AgentCardDetailInfo toLegacyCard(AgentCallInterface callInterface, String agentName,
+    private AgentCardDetailInfo toLegacyCard(AgentCallInterface callInterface,
+        String agentName,
         String version, String storedType) throws NacosApiException {
         try {
-            AgentCard card = JacksonUtils.toObj(JacksonUtils.toJson(
+            AgentCard card = JsonUtils.toObj(JsonUtils.toJson(
                 callInterface.getNativeDescriptor()), AgentCard.class);
             AgentRequestUtil.validateAgentCard(card);
             if (!agentName.equals(card.getName()) || !version.equals(card.getVersion())) {
@@ -510,10 +423,9 @@ public class A2aServerOperationService implements A2aOperationService {
         }
         List<AgentInterface> interfaces = new ArrayList<AgentInterface>(hosts.size());
         for (Instance instance : hosts) {
-            AgentInterface agentInterface = AgentCardUtil.buildAgentInterface(instance);
-            if (StringUtils.isBlank(agentInterface.getProtocolVersion())) {
-                agentInterface.setProtocolVersion(callInterface.getProtocolVersion());
-            }
+            AgentInterface agentInterface = A2aEndpointUtils.toAgentInterface(
+                AgentRuntimeEndpointMapper.fromInstance(instance),
+                callInterface.getProtocolVersion());
             interfaces.add(agentInterface);
         }
         AgentInterface preferred = selectPreferred(interfaces, card.getPreferredTransport());
@@ -537,11 +449,8 @@ public class A2aServerOperationService implements A2aOperationService {
     }
     
     private String endpointNaturalKey(String namespaceId, String agentName, Instance instance) {
-        AgentInterface agentInterface = AgentCardUtil.buildAgentInterface(instance);
-        Endpoint endpoint = new Endpoint();
-        endpoint.setUri(agentInterface.getUrl());
-        endpoint.setTransport(agentInterface.getProtocolBinding());
-        return EndpointNaturalKey.of(namespaceId, agentName, A2A_PROTOCOL, endpoint).toString();
+        return EndpointNaturalKey.of(namespaceId, agentName, A2A_PROTOCOL,
+            AgentRuntimeEndpointMapper.fromInstance(instance)).toString();
     }
     
     private Map<String, String> metadata(Instance instance) {
@@ -585,13 +494,13 @@ public class A2aServerOperationService implements A2aOperationService {
     }
     
     private boolean hasA2aLatest(AgentSummary summary) {
-        if (summary.getVersionCatalog() == null
-            || StringUtils.isBlank(summary.getVersionCatalog().getLatestVersion())
-            || summary.getVersionCatalog().getOnlineVersions() == null) {
+        if (summary.getVersionInfo() == null
+            || StringUtils.isBlank(summary.getVersionInfo().latestVersion())
+            || summary.getVersionInfo().getOnlineVersions() == null) {
             return false;
         }
-        String latest = summary.getVersionCatalog().getLatestVersion();
-        for (AgentVersionCatalogEntry entry : summary.getVersionCatalog().getOnlineVersions()) {
+        String latest = summary.getVersionInfo().latestVersion();
+        for (AgentVersionSummary entry : summary.getVersionInfo().getOnlineVersions()) {
             if (latest.equals(entry.getVersion()) && entry.getProtocols() != null
                 && entry.getProtocols().contains(A2A_PROTOCOL)) {
                 return true;
@@ -601,7 +510,7 @@ public class A2aServerOperationService implements A2aOperationService {
     }
     
     private AgentCardVersionInfo projectVersionInfo(AgentSummary summary) throws NacosException {
-        String latest = summary.getVersionCatalog().getLatestVersion();
+        String latest = summary.getVersionInfo().latestVersion();
         com.alibaba.nacos.api.ai.model.agent.AgentVersionDetail latestDetail =
             agentOperationService.getVersion(summary.getNamespaceId(), summary.getAgentName(),
                 latest);
@@ -611,7 +520,7 @@ public class A2aServerOperationService implements A2aOperationService {
             registrationType(latestA2a));
         AgentCardVersionInfo result = AgentCardUtil.buildAgentCardVersionInfo(latestCard,
             registrationType(latestA2a), true);
-        Set<String> versions = a2aVersions(summary.getVersionCatalog().getOnlineVersions());
+        Set<String> versions = a2aVersions(summary.getVersionInfo().getOnlineVersions());
         result.setVersionDetails(toLegacyVersionDetails(loadAllOnlineVersionSummaries(
             summary.getNamespaceId(), summary.getAgentName()), versions, latest));
         return result;
@@ -635,10 +544,10 @@ public class A2aServerOperationService implements A2aOperationService {
         }
     }
     
-    private Set<String> a2aVersions(List<AgentVersionCatalogEntry> entries) {
+    private Set<String> a2aVersions(List<AgentVersionSummary> entries) {
         Set<String> result = new LinkedHashSet<String>();
         if (entries != null) {
-            for (AgentVersionCatalogEntry entry : entries) {
+            for (AgentVersionSummary entry : entries) {
                 if (entry.getProtocols() != null && entry.getProtocols().contains(A2A_PROTOCOL)) {
                     result.add(entry.getVersion());
                 }
@@ -671,12 +580,13 @@ public class A2aServerOperationService implements A2aOperationService {
         return result;
     }
     
-    private String latestVersion(Agent agent) {
-        return agent.getVersionCatalog() == null ? null
-            : agent.getVersionCatalog().getLatestVersion();
+    private String latestVersion(AgentSummary agent) {
+        return agent.getVersionInfo() == null ? null
+            : agent.getVersionInfo().latestVersion();
     }
     
-    private Agent getLegacyAgent(String namespaceId, String agentName) throws NacosException {
+    private AgentSummary getLegacyAgent(String namespaceId, String agentName)
+        throws NacosException {
         try {
             return agentOperationService.getAgent(namespaceId, agentName);
         } catch (NacosApiException e) {
@@ -689,12 +599,6 @@ public class A2aServerOperationService implements A2aOperationService {
     
     private String formatTime(Long epochMillis) {
         return LEGACY_TIME_FORMATTER.format(Instant.ofEpochMilli(epochMillis));
-    }
-    
-    private NacosApiException invalidRegistrationType(String value) {
-        return new NacosApiException(NacosException.INVALID_PARAM,
-            ErrorCode.PARAMETER_VALIDATE_ERROR,
-            "registrationType must be URL or SERVICE: " + value);
     }
     
     private NacosApiException agentNotFound(String agentName) {

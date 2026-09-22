@@ -150,6 +150,33 @@ to `config_info_gray`, are treated as removed compatibility behavior. Operators
 that upgrade from versions before 3.0 must complete the affected data migration
 before upgrading when they used the default namespace or beta gray release.
 
+### 8.1 Client API Authentication Default In Nacos 3.3
+
+Nacos 3.3 changes Client API authentication from disabled by default to enabled
+by default. This is a default-value change, not an API deprecation or removal.
+The compatibility rules are:
+
+| Deployment state | Effective Client auth behavior |
+| --- | --- |
+| `nacos.core.auth.enabled=false` is explicitly present | Remains disabled. |
+| `nacos.core.auth.enabled=true` is explicitly present | Remains enabled. |
+| The property is absent | Uses the Nacos 3.3 default and is enabled. |
+| A new distribution configuration template is used | Enabled by the template. |
+| An older manually maintained file containing `false` is reused | Remains disabled. |
+| A Docker or Kubernetes auth environment value is absent | Uses the image/template default and is enabled. |
+| A Docker or Kubernetes auth environment value is explicit | The explicit `true` or `false` wins. |
+
+Operators upgrading applications that do not yet carry credentials should keep
+the Client switch explicitly disabled, distribute credentials, verify client
+login, and then enable the runtime-refreshable switch on every server member.
+Mixed effective values within one cluster are not a supported final rollout
+state. Release notes and upgrade documentation must call out the new default,
+the credential prerequisites, and the explicit-disable migration path.
+
+The existing switch is the compatibility mechanism. This change does not add a
+second legacy-auth switch, does not force-rewrite an existing configuration
+file, and does not change the independent Admin or Console auth defaults.
+
 ## 9. Deprecated V3 API Gate
 
 A small set of deprecated v3 APIs pending removal is disabled by default:
@@ -219,8 +246,14 @@ Compatibility windows are intentionally different by audience:
 
 No new capability may be added only to these facades. New development targets
 the Agent Management and RAD contracts. Historical data and mixed-server
-rolling upgrade are a separate migration plan and do not extend the API window
-by themselves.
+rolling upgrade follow the
+[Historical A2A Upgrade Migration Spec](../ai/a2a-upgrade-migration-spec.md)
+and do not extend the API window by themselves. Its reconciliation state,
+control objects, migration source guards, transition Runtime dual
+materialization, optional historical Naming shadow, and migration-only
+configuration support Nacos 3.0-3.2 upgrades and are pending removal in Nacos
+4.0. Canonical Agent/RAD facts and any public A2A facade still inside its own
+compatibility window remain after that temporary implementation is removed.
 
 ## 12. Legacy MCP Identifiers
 
@@ -245,6 +278,24 @@ separate migration for Config coordinates, direct consumers, SDK models, and
 wire responses; no removal version is defined by the first lifecycle-hosting
 migration. Exact behavior belongs to the
 [MCP Server Spec](../ai/mcp-server-spec.md).
+
+### 12.1 Legacy MCP Maintainer Methods
+
+The legacy `McpMaintainerService` detail and direct-online create/update
+methods are deprecated since Nacos 3.3.0 and planned for removal in Nacos
+4.0.0. Their runtime behavior remains compatible during this window. Callers
+should migrate as follows:
+
+| Deprecated operation | Canonical replacement |
+| --- | --- |
+| Serving-projection detail | Select an exact Version with `listMcpServerVersions`, then use `getMcpServerVersion`. |
+| Local, remote, or generic direct-online create | Use `createMcpServer(McpServerDraftRequest)`, then `submitMcpServerVersion`; when review applies, explicitly use `publishMcpServerVersion` after approval. |
+| Direct-online update | Use `createMcpServer(McpServerDraftRequest)` for a new Version or `updateMcpServer(McpServerDraftRequest)` for an existing draft, then submit and, when required, publish it. |
+
+Legacy cross-resource list/search and published-Version or full-Resource
+delete methods are not deprecated by this decision because the typed lifecycle
+surface does not yet provide semantics-equivalent replacements. They require a
+separate API design and deprecation review before any removal version is set.
 
 ## 13. Related Specs
 

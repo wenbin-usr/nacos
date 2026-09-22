@@ -102,7 +102,7 @@ The target Client SDK must:
 - expose Agent Search, Discover with and without a Filter, Watch and cancel,
   and runtime Endpoint Register and Deregister;
 - expose optional code-first Agent definition publication through
-  `AiService.publishAgent`, creating only a draft by default and optionally
+  `AiService.agent().publishAgent`, creating only a draft by default and optionally
   running the ordinary submit Pipeline through `autoSubmit`;
 - inject the bound namespace into a transport request without mutating a
   caller-owned object; and
@@ -140,12 +140,30 @@ metadata, endpoint request, reconnect snapshot, or ability negotiation. It does
 not add Runtime Version ranges or multiple-transport fields. Such endpoint
 model changes require a later compatibility design.
 
-The Maintainer SDK retains its current MCP create/update/delete/query methods as
-direct-online compatibility facades and adds typed methods matching the Admin
-MCP Version, draft, submit, publish, force-publish, redraft, online, offline,
-and label operations. Every new management call identifies its namespace and
-uses `mcpName + version` with the same lifecycle application service as Admin
-and Console APIs.
+The Maintainer SDK retains its current MCP methods as compatibility facades and
+adds typed Version-management methods matching the Admin MCP Version, draft,
+submit, publish, force-publish, redraft, online, offline, and label operations. Legacy detail
+and direct-online create/update methods are deprecated since 3.3.0 and planned
+for removal in 4.0.0. Callers should use exact Version reads and the
+draft-submit-publish flow. Cross-resource list/search and published-Version or
+full-Resource delete remain available until semantics-equivalent typed methods
+are designed. Every new management call identifies its namespace and uses
+`mcpName + version` with the same lifecycle application service as Admin and
+Console APIs.
+
+Draft create/update methods reuse the established `createMcpServer` and
+`updateMcpServer` names through request-object overloads. Other method and model
+names describe Versions and user operations and do not expose the internal
+Lifecycle hosting mechanism.
+
+The typed request objects are `McpServerDraftRequest`,
+`McpServerVersionCommand`, and `McpServerLabelsUpdateRequest`. They do
+not add top-level namespace or `mcpId` selectors; explicit overloads accept
+namespace separately and convenience overloads use the default namespace.
+Historical identity fields inside the reused `McpServerBasicInfo` content are
+ignored for lifecycle target resolution. The implementation maps these models
+to the existing Admin form/query contract rather than adding JSON-body HTTP
+routes.
 
 Existing Maintainer overloads that accept only `mcpId` remain deprecated
 compatibility inputs. The server resolves the alias from MCP AI Resource rows
@@ -153,11 +171,24 @@ and then applies the same name-based authorization and operation. The Java
 Client does not start populating the dormant top-level gRPC `mcpId`; current
 model, event, and release-response ID fields remain wire-compatible.
 
-Client HTTP parity with gRPC is deferred until MCP lifecycle hosting is
-complete. A later design should preserve the public SDK interface where
-possible, keep HTTP and gRPC semantics identical, and reuse Agent HTTP
-publisher heartbeat/renewal rather than creating a second liveness model. This
-spec does not yet define those HTTP paths, payloads, or heartbeat intervals.
+The Java Client exposes MCP query, release, Runtime Endpoint publication, and
+polling subscription through `grpc`, `http`, and `auto` using the existing
+`nacosAiTransportMode` property. Existing overloads remain direct-online and
+are equivalent to `createDraft=false`. Two source- and binary-compatible
+default overloads add `createDraft`; `true` creates only a lifecycle draft.
+Third-party `AiService` implementations that have not implemented the new
+operation must reject `true` with `SERVER_NOT_IMPLEMENTED` rather than silently
+delegate to direct-online release.
+
+One `AiService` instance shares one stable HTTP client id and one heartbeat
+coordinator across Agent and MCP Runtime publications. Each domain retains its
+own complete desired payload, while `HTTP_CLIENT_NOT_FOUND` marks and replays
+all HTTP-owned Agent and MCP publication intent. MCP subscription remains local
+polling but executes each query through the selected transport router.
+
+MCP Client HTTP inputs use canonical `mcpName`; no new top-level `mcpId` input
+is added. Query and release return the existing `McpServerDetailInfo` and String
+ID shapes, and Endpoint liveness reuses `ClientLivenessInfo`.
 
 ## 6. Security Rules
 

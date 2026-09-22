@@ -105,6 +105,9 @@ Admin API 或 Maintainer SDK，除非某能力被明确设计为仅控制台可�
 
 当前 v3 Console API 范围由 [V3 API 范围](../http-api/v3-api-surface.md)描述。
 
+远程 Admin 业务错误遵循[响应与错误规范](../http-api/response-error-spec.md)：独立 Console
+保留上游 HTTP 状态、业务码、摘要和字符串详情，不应将类型化业务失败统一转换为 `SERVER_ERROR`。
+
 ## 5. UI 入口与静态资源
 
 Console 负责浏览器入口和静态资源服务行为：
@@ -116,6 +119,11 @@ Console 负责浏览器入口和静态资源服务行为：
 - 静态资源路径和浏览器资源可以排除鉴权，但该排除范围不得包含领域修改 API。
 
 Console guide 和 announcement 内容属于 UI 展示数据，不是标准 Core 服务端状态，也不得作为领域配置使用。
+
+生命周期托管的 AI Resource Detail Page 应共享相同的状态和 Version 展示组件。MCP、Skill 和 Prompt
+不得分别重复实现启用/禁用、公开/私有、最新、草稿、审核中、待发布或审核拒绝等视觉状态。MCP Detail
+从选中的 Online Version 创建新 Draft；只有保留的 MCP Resource 在唯一首个 Draft 删除后不存在任何
+Version 时，才展示通用“新建版本”入口。
 
 ## 6. Handler 与 Proxy 边界
 
